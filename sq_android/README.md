@@ -1,0 +1,167 @@
+# sq_android — the platform layer
+
+How this project meets Android. Everything here is **yours** (ownership class:
+seeded) — the generator wrote it once and will not overwrite it.
+
+This is the expert escape hatch. You should not normally need it.
+
+```text
+AndroidManifest.xml    package id, activity, launcher entry, the entry function
+entry.cpp              native_app_glue loop → your App
+android_text.hpp/.cpp  the keyboard, what a key types, the clipboard (JNI)
+res/values/            label and icon colour
+res/drawable/          the icon, as a vector path
+res/mipmap-*/          adaptive icon and legacy fallback
+```
+
+## `entry.cpp`
+
+Runs the `android_native_app_glue` event loop, translates lifecycle and input
+events into calls on your `App`, and brings up a rendering surface if a
+rendering kit was applied.
+
+The renderer import is guarded, so this file compiles with no kit at all.
+That guard is what makes `kit.opengl` and a future `kit.sfml` alternatives
+rather than one of them being baked in.
+
+**What the device lacks is decided from its API level**, read once at start
+from the configuration NativeActivity already holds
+(`AConfiguration_getSdkVersion`) and logged with the process's name as
+`device: API <n>, process <name>` (an app with a `:console` process logs
+each separately); the GL
+driver is logged once as `driver: <version>; <renderer>; <vendor>` when the
+first context is current. Both reach logcat (`make logcat`, through adb), which is
+how a device without Termux is read. Each such check costs a comparison,
+cheaper than reading a cached answer from storage, so nothing is cached.
+
+**The UI thread.** Everything here runs on the glue's thread, but a window's
+views belong to Android's main thread, so hiding the bars must happen there.
+The manifest names `squared_on_create` as the activity's entry
+(`android.app.func_name`): it runs on the main thread, adds a pipe to that
+thread's looper, then starts the glue as its own entry would. The glue's
+thread writes one byte, a job, into the pipe (`hide bars`, `show bars`, `to
+the background`) and the main thread runs it: a few JNI calls on the thread
+they belong to, no Java. Without the manifest line the glue starts alone:
+the bars stay up, and the rest works.
+
+**The system bars are hidden** (immersive) unless your app says
+`app.stage.hide_bars( false )`: through `WindowInsetsController` from API 30,
+the system UI flags from 19. A swipe from the edge shows them for a moment.
+They are asked for again after each focus (a dialog may bring them back).
+
+**Back at your root screen** sends the app to the background
+(`moveTaskToBack`), as Home does; only a quit (`quit`, `app.quit()`) ends it.
+
+**What Android keeps.** When Android asks (its save instance state), the App
+hands it the screen stack, a few hundred bytes; the log says `saved state: N
+bytes, for Android to keep with the activity`. At the next start the log
+says what came back: `saved state: N bytes: Android brings the activity
+back` when Android ended the process itself (memory, the freezer), and the
+App shows the screens again; `saved state: none: a new launch` after a swipe
+from the recent apps, a quit, a force stop or a reboot, and the App starts
+fresh. Your model's own save (`save()`) comes back either way.
+
+**The safe area** (the camera cut-out, the keyboard, the bars when shown) is
+measured from the window's insets from API 23. Below that, those methods do
+not exist, and the window's visible frame (`getWindowVisibleDisplayFrame`,
+API 1) answers instead: some older devices lay the window out under
+translucent bars, and the Android 5.1 tablet does (found 2026-10-19: its
+clock and battery drew over the Console's `[x]`). It is measured on events,
+never on a timer: for a few frames after a new window, a rotation, the bars
+hidden or shown, and the keyboard shown or hidden, and every 30 frames while
+the keyboard is up (it can be closed without a word to the app).
+
+**Typing.** NativeActivity gives native code key codes, never characters.
+`android_text.cpp` turns a key press into the character it types through
+Java's `KeyCharacterMap` (one JNI call per key press, never per frame), and
+shows and hides the soft keyboard. `entry.cpp` hands your `App` a
+`sq::app::TextInputService` (`set_text_input_service`): when a text field
+takes focus the keyboard shows, and each key arrives as a `KeyDown` event
+and, if it types something, a `TextInput` event. What does not arrive: an
+input method's composition (accents built from two keys, CJK input, emoji),
+which needs a Java `InputConnection`. The volume keys are left to Android.
+
+**The Console** (`make CONSOLE=app`; see squared's `docs/programmer/console.md`).
+A three-finger tap anywhere, or `` ` `` on a keyboard, opens and closes it;
+the gesture is taken before your `App` sees it (fingers already down are
+released far off screen, so nothing is clicked). While it is open, a gesture
+that starts on it is its own: tap to type (the keyboard shows), drag to
+scroll back, hold the input row for half a second to paste, `[x]` or Back
+to close. `copy` puts lines on the clipboard. Every other touch, and every
+key while it is closed, reaches your `App` as before.
+
+`app stop` disposes your `App` and puts a fresh, uncreated one in its place;
+`app start` creates it and hands it the surface again, as at launch;
+`app restart` does both. The process, the window, the graphics context and
+the Console stay, so this recovers from a stuck screen or bad state, not from
+a crash. While stopped, no method of your `App` is called and the screen is
+cleared under the Console. In a Console build a `create()` that fails no
+longer leaves a black window: the Console opens and `app start` tries again.
+`quit` finishes the activity, the same way your `quit_requested()` does.
+
+**From Termux.** A Console build also listens for Termux on this phone
+(`127.0.0.1`, a port made from the package name, and a secret your build
+makes): `make console` in the project shows the Console's lines as they are
+written and runs what you type, `make console CMD='mem'` runs one command.
+It waits for the app, and reconnects when the app restarts. `make
+console-only` starts the app with only the Console running: your `App` is
+created by `app start`, so an app that crashes at start can still be reached.
+The app's own files go through it both ways: `ls files`, `pull
+files/crash-previous.txt` (saved in `build/pulled/`), `pull apk`, and `push
+<file> [name]` typed in `make console` (into the app's `files/`); `logcat`
+shows the app's own system log (a library that failed to load, a Java
+exception) and `libs` what it loaded, no adb needed. `screens` lists your
+App's screens and panes and what each keeps (scrolls, an unfinished edit),
+as Android would be given them; `screens low-memory` sends Android's
+low-memory event through it. `dump` runs groups of
+commands, one a frame: `dump sys` (every system command, `gl` and `display`
+among them), `dump memory`, `dump crash` (the last crash report, the last
+run's log, the system log), several at once (`dump sys crash`), `dump all`;
+`dump` alone lists them. The entry calls `console.update()` every loop turn
+for it, and wakes every 16 ms while a dump runs with the app in the
+background.
+The secret is in the APK, which other apps can read, so this keeps out apps
+that are not looking for it, no more: dev builds only. A Console build
+carries the `INTERNET` permission, as a `DEV_LOG` build does.
+
+**The last run's log.** The newest 200 lines are saved to `files/log.txt`
+when the app leaves the screen and when it ends; the next launch moves them
+to `log-previous.txt`, and `log previous` shows how that run ended (a
+`quit`, a swipe away).
+
+**Crash reports.** In a Console build a fatal signal (a segfault, an abort)
+writes a report to the app's private files, `files/crash.txt`: the trace,
+each frame as a library and an offset for `addr2line`, then the last 40 lines
+of the log. The next launch shows it in the Console, in red, once, and moves
+it to `crash-previous.txt`; `crash` shows it again. The signal then goes on
+to the dev log's handler (with `DEV_LOG`) and to Android's own crash report,
+so nothing else is lost.
+
+## `AndroidManifest.xml`
+
+Two deliberate absences:
+
+**No `<uses-sdk>`.** `minSdkVersion` and `targetSdkVersion` are passed to
+`aapt2` by the build, so `make apk SQ_MIN_SDK=26` retargets without editing a
+file. Declaring them here too would create two sources of truth, and aapt2
+would take this one. `SQ_MIN_SDK` (default 22) is also what the code is
+compiled and linked for, so the manifest cannot claim a level the library was
+not built for.
+
+**No `android:debuggable`.** The build sets it for `DEV_LOG` and `CONSOLE`
+builds (`aapt2 link --debug-mode`, read back from the linked manifest to
+check), so `run-as` reaches their private files; plain builds never carry it.
+`SQ_DEBUGGABLE=` turns it off for one build, `SQ_DEBUGGABLE=1` on. Committing
+it here would ship a debuggable release.
+
+`android:hasCode="false"` and `android.app.NativeActivity` are what let this
+project have no Java: the APK carries no `classes.dex`, and the build needs a
+JDK only for signing.
+
+## The icon
+
+`res/drawable/ic_launcher_foreground.xml` is a vector path — text, reviewable
+in a diff, editable without an image editor. `res/mipmap-hdpi/ic_launcher.png`
+is the legacy fallback for API < 26 and draws the same shape.
+
+Replace both when you have a real icon.

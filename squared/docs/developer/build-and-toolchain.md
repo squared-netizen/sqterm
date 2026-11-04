@@ -1,0 +1,561 @@
+# Build and toolchain
+
+## What the build is
+
+GNU make plus clang and libc++ (since 7b.4: squared is modules, built the
+way clang builds them, [modules.md](modules.md); until then g++; C++23 with
+libc++'s `import std;` since 2026-11-02). One
+`build/common.mk` with every shared setting, one
+`Makefile` per module, one top-level `Makefile`, and two bash entry points in
+`tools/`. No CMake, no generator step, no network access, no `sudo`, and no
+path outside the project root &mdash; the same build runs under Termux on
+Android and on desktop Linux.
+
+## Targets
+
+```sh
+make                 # every module, release
+make BUILD=debug     # -O0 -g
+make gui             # one module
+make headers         # the pinned std sources, the module order (tools/check_modules.sh)
+make sqgen           # sqgen and sqconsole, the host tools, in build/<BUILD>/
+make lint            # format, source-rule and clang-tidy checks
+make V=1             # every command in full
+make SQUARED_CACHE=off   # no build cache (below)
+make clean           # keeps build/cache
+```
+
+Module dependency order is declared in the top-level `Makefile`, so `make -j`
+is safe.
+
+## What a build prints
+
+Since 2026-10-20 (sq-quiet-build) a build prints one short line as each step
+starts, not make's echo of every command. On the phone that echo was most of
+the screen: each compile repeated the full flag list and two absolute paths,
+each test link every source and archive, and each module make two "Entering
+directory" lines and a "Nothing to be done". The same build now prints:
+
+```
+squared release: flags as before
+  mod  sq.gui-label
+  cc   gui/src/stage.cpp
+  ar   libsquared_gui.a (38 from the cache)
+  bin  gui/ui_keys_test
+  test gui/ui_keys_test
+       ok
+  dev: 3 unchanged since they passed
+```
+
+How, all in `build/common.mk`, with no filter and no pipe:
+
+- `MAKEFLAGS += -s` unless `V=1`. Every module make inherits it: no command
+  echo, no "Entering directory", no "Nothing to be done". Errors (`make:
+  *** ... Error 1`) still print.
+- `$(call say,<step>,<what>)` before each compile, archive and test link: one
+  `printf` as the step starts, so no step is silent however long it takes.
+  The path is from `squared/` (`$(MODULE)/$*.cpp`). Every line names its
+  module because `make -j` interleaves modules; a heading per module would be
+  wrong as soon as two build at once.
+- An interface unit's compile says `mod` and its BMI's name (`sq.gui-label`,
+  7b.4).
+- An object's compile is said by `tools/cached_cc.sh` (`SQUARED_SAY`), and
+  only when it compiles: an object from the build cache prints nothing, and
+  the archive's line counts them, `(38 from the cache)` (7b.3, below).
+- The flags, said once (below).
+- `run_tests` prints the test's name, runs it with its output in
+  `<binary>.log`, then `ok`, or `FAIL (exit N)` / `FAIL (signal N)` and the
+  whole log. Under `V=1` the output prints as the test runs.
+
+Why not a filter script (`make 2>&1 | tools/quiet`): a pipe hides make's exit
+status unless every caller sets `pipefail`, the compiler stops colouring
+diagnostics when its output is not a terminal, and a filter that buffers
+makes a long compile look hung. Printing from make costs one `printf` per step
+(well under a millisecond against a compile of a second or more on the
+phone). Measured on this host, once each: a clean `make -j8` took 35 s
+before and 33.5 s after (the same, within noise), and a clean build plus
+`make test` printed 7 KB where the build alone had printed 62 KB and the
+tests 35 KB more.
+
+Compiler diagnostics still carry absolute paths: the rules pass absolute
+paths to the compiler, and the paths in `.d` files depend on that.
+
+With the echo gone a warning stands out, so the three g++ printed and clang
+does not were fixed in the same change: a `-Wsign-conversion` in
+`console/src/file_commands.cpp` (a `? 1 : 0` added to a `std::size_t`, now an
+`if` and `++`), and two `-Wunused-result` in tests, where g++ ignores a cast
+to `void` and a `[[maybe_unused]]` named value now holds the result. g++ and
+clang both build the tree and its tests without a warning.
+
+**The flags stamp.** `build/<BUILD>/flags` holds the compiler and its flags
+(`$(CXX) $(SQUARED_CXXFLAGS) $(SQUARED_EXTERNAL_INCLUDES)`); every object and
+test binary depends on it, and it is rewritten only when they change. Before,
+make compared timestamps only, so `make SQUARED_ABI=-fno-rtti` after a normal
+build did nothing. The first make to read `common.mk` (the root `Makefile`
+now includes it, or a module's when built alone) compares the stamp and says
+`squared release: flags as before`, or lists every flag one to a line with
+`(new)` and `(gone)` marks; it exports `SQUARED_FLAGS_SAID` so the module
+makes say nothing more. Only a make whose goal builds or tests (`all`,
+`test`, `retest`, a module) reads or writes the stamp: `tools/lint.sh` asks
+the Makefiles for variables with other flags, and must not rewrite it. For
+the screen only, an option keeps its path on its line (`-idirafter <dir>`)
+and `$PREFIX` and `~` shorten paths.
+
+`CXXFLAGS_EXTRA` is no longer appended to `CXXFLAGS`: compiles use
+`SQUARED_CXXFLAGS = $(CXXFLAGS) $(CXXFLAGS_EXTRA)`. With the root Makefile
+reading `common.mk`, a `CXXFLAGS` from the environment would otherwise reach
+the module makes with the extra flags already in it and get them twice.
+
+Tests and tools build with `TESTFLAGS = $(STANDARD) -O1 -g $(SQUARED_ABI)`
+(`STANDARD`: `-std=c++23 -stdlib=libc++ -pthread -D__BIONIC_CTYPE_INLINE=inline`,
+`-stdlib=libc++` left out where `-stdlib++-isystem` names the headers,
+[modules.md](modules.md#what-an-importer-must-share)). The
+`$(SQUARED_ABI)` is new: before, `make SQUARED_ABI=-fno-rtti test` failed to
+link `gui`'s tests, built with RTTI against archives without it (`undefined
+reference to typeinfo for sq::gui::Widget`).
+
+Checked on this host, g++ and clang: clean build, `make test`, nothing
+changed (two lines per make), `CXX=clang++ SQUARED_ABI=-fno-rtti` (listed as
+`clang++ (new)`, `-fno-rtti (new)`, `g++ (gone)`; all 76 compiles and every
+test rebuilt; all 22 tests pass), a planted compile error (the `cc` line, then
+the compiler's message in full, then make's error), a planted failing test
+(`FAIL (exit 3)`, its log, make's error), `V=1`, and the lint's variable
+reads (no line printed, the stamp untouched).
+
+## Flags
+
+Defaults in `build/common.mk`:
+
+```
+-std=c++23 -stdlib=libc++ -pthread -D__BIONIC_CTYPE_INLINE=inline -O2 -DNDEBUG
+-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
+-fno-common -ffunction-sections -fdata-sections -fvisibility=hidden
+```
+
+The tree builds **warning-free** at that level. `-Wconversion` and
+`-Wsign-conversion` are on deliberately: they are the warnings that catch the
+narrowing bugs that hurt on a 32-bit Android target, and the code is already
+clean under them, so keeping them on costs nothing and protects that.
+
+`-ffunction-sections -fdata-sections -fvisibility=hidden` are there because
+Android is the constraining target: they let the linker drop unreferenced code
+from the final APK.
+
+Every setting is overridable:
+
+```sh
+make CXX=clang++ CXXFLAGS_EXTRA=-fsanitize=address
+```
+
+## Android: target, sysroot and runtime
+
+The Android template compiles the application and the vendored framework with
+the host's clang (Termux's) against the **NDK's sysroot**, for the API level in
+`SQ_MIN_SDK` (default 22), and links the **NDK's libc++ statically** (since
+Sprint 3, task 3.3, 2026-10-16). The flags live in the template's
+`mk/squared_generated.mk`; `mk/pkg_squared_core.mk` passes them to this tree's
+build as `CXX` and `CXXFLAGS_EXTRA`.
+
+```
+--target=aarch64-linux-android$(SQ_MIN_SDK) --sysroot=<ndk>/sysroot     compile and link
+-stdlib++-isystem <ndk>/sysroot/usr/include/c++/v1                      C++ compiles
+-L<ndk>/sysroot/usr/lib/aarch64-linux-android/$(SQ_MIN_SDK)              link
+-nostdlib++ --unwindlib=none -Wl,--hash-style=both -Wl,--gc-sections     link
+libc++_static.a libc++abi.a <ndk clang>/libunwind.a                     link, last
+```
+
+**What it replaced, and what was wrong with it.** Termux's clang targets
+`aarch64-unknown-linux-android24` and its own sysroot by default, and the build
+never told it otherwise: `SQ_MIN_SDK` reached only the manifest. The library
+was compiled against API 24's headers, linked against Termux's copies of the
+system libraries, carried only `DT_GNU_HASH`, and needed `__register_atfork`
+(API 23). Android 5.1 refuses such a library on all three counts. The probe
+that found this is `probe_api22.sh` (3.3, not kept in the tree).
+
+**Why this shape.**
+
+- `--sysroot` replaces Termux's headers and libraries wholesale. Putting the
+  NDK's headers on `-I` was tried long ago and broke `<cctype>` (two C
+  libraries ahead of libc++'s wrappers); a sysroot is one coherent set. The
+  `-idirafter` that `mk/pkg_squared_core.mk` still adds for the GL headers is
+  now redundant and harmless.
+- `-stdlib++-isystem` selects the NDK's libc++ headers, the ones
+  `libc++_static.a` was built from, and affects only C++ compiles; Termux's
+  clang would otherwise find Termux's own libc++ beside itself. In NDK r29 both
+  are libc++ 21, but their `__config_site` need not agree.
+- **Static runtime.** An application is one `.so`, the case the NDK documents
+  the static runtime for. Only the libc++ code the program reaches is linked
+  (with `--gc-sections`, which also drops this tree's unreferenced functions);
+  there is one library fewer to map and relocate at start; and the class of
+  failure where the bundled `libc++_shared.so` lacked a symbol the headers
+  called (`std::__hash_memory`, 2026-10-13) cannot happen. Priority 1 governed:
+  code only for what is used, no second library's relocated data per process.
+  The trade: a second native library in one APK would each carry their own
+  copy, and `operator new` replacement must stay in the one library (it does).
+- **Named by path.** Termux's clang always asks for `-lc++_shared`
+  (`-nostdlib++` stops it) and finds its unwinder beside itself, which the
+  sysroot hides; `--unwindlib=none` plus the NDK clang's own `libunwind.a`
+  replaces it. The same reasoning as the GLES libraries: a search order cannot
+  go wrong when there is no search.
+- `--hash-style=both`: `DT_HASH` for the loader before Android 6.0,
+  `DT_GNU_HASH` for faster lookup after. A few hundred bytes.
+- **The API level is enforced by the link.** That level's stubs define nothing
+  newer, and the template links with `-Wl,--no-undefined`, so a newer call
+  fails the build. Newer functions are reached with `dlsym` and recorded by the
+  feature cache (3.4).
+
+**Checked on the phone (2026-10-16, NDK r29, clang 21.1.8).** Every framework
+and demo source (83 files) compiles for API 22 with the NDK's headers; a trial
+library linked this way carries both hash tables, needs only `liblog`,
+`libdl`, `libm` and `libc`, and references one symbol newer than API 22,
+`memfd_create`, weakly (from the runtime; resolved as null on older releases).
+The demo APK already carries a v1 signature, which Android 5.1 needs.
+
+**Flags stamp.** The project's `squared-core` target writes the flags it
+builds with to `build/release/.project-flags` and cleans the tree when they
+change. It predates this tree's own stamp (above), which now rebuilds every
+object when the compiler or a flag changes; the project's clean is kept
+because its stamp also holds the backend and platform, which change which
+files are compiled, not how. It exists so
+archives for one level or one libc++ never link into a library for another.
+Since 2026-10-19 the Console's sizes are in it whatever `CONSOLE` is, and
+`SQUARED_CONSOLE` itself never is (no framework code reads it): switching
+`CONSOLE` on or off left the stamp different and cleaned the whole tree,
+though only the Console module reads a size and its archive is built in every
+build anyway. Now only a change of size does.
+
+## Building only what changed
+
+Three things made a package round on the phone rebuild everything, and each
+is fixed (2026-10-19):
+
+1. **Vendoring replaced the example's `squared/` whole,** build output
+   included, so the next `make` compiled the framework from nothing and every
+   application file that includes it. `vendor_framework.sh` (examples repo)
+   now writes only the files that differ from the commit, removes the ones the
+   commit dropped, leaves the rest untouched (timestamps included), and keeps
+   `build/release` and `build/debug`. A written file gets the current time,
+   not the commit's: `git archive` dates files at their commit, which can be
+   older than objects built from the previous version, and make would keep
+   those. Checked on clones: a one-line change to `console/src/args.cpp`
+   vendored as "1 changed, 404 unchanged", and the next `make` compiled one
+   file where it had compiled 74.
+2. **Switching `CONSOLE` cleaned the framework** (the stamp, above).
+3. **Every test ran on every `make test`.** Each module's `test` target is now
+   `$(call run_tests,$(TESTS))` (`build/common.mk`): a test runs when its
+   binary is newer than its `<binary>.passed` mark, which only a pass writes.
+   Every test binary depends on the headers its sources include (its `.d`,
+   since 7b.2; until then every header in the tree, `SQUARED_HEADERS`), its
+   sources and the archives it links, so an unchanged binary means unchanged
+   inputs; the tests read nothing that
+   varies between runs except the host's `/proc`, whose answers they check
+   for shape. This reverses graphics' earlier rule ("every test runs on
+   every `make test`"), which was right while tests did not depend on their
+   headers: then an unchanged binary could hide a changed header. Recipes that
+   passed `$^` to the compiler now pass `$(SQUARED_TEST_INPUTS)`, the sources,
+   objects and archives among the prerequisites (7b.2; it was `$(filter-out
+   %.hpp $(SQUARED_FLAGS_STAMP),$^)`, which the headers a `.d` adds, `.h`
+   and `.inc` among them, would have passed to the compiler). Checked in
+   2026-10-19:
+   nothing changed, all 18 kept in under a second; a console `.cpp` touched,
+   only console's 4 ran; a header touched, all ran; a failing test left no
+   mark and ran again.
+
+## Build speed (7b.2)
+
+*Until 7b.4. The precompiled header below was replaced by sq.std, squared's
+own module of the standard library, when squared became modules: the two do
+not mix. sq.std was replaced by libc++'s `import std;` on 2026-11-02
+([modules.md](modules.md#std)). `build/std_pch.hpp`,
+`tools/std_pch.sh`, `SQUARED_PCH` and `-fpch-instantiate-templates` are gone.
+What follows is kept for the measurements.*
+
+Measured on the phone first (2026-10-27, `measure_build.sh`, the 7b.1
+package): 8 cores, clang 21.1.8, libc++ 21 on both sides, NDK 29.
+
+| What | Time |
+|---|---|
+| the framework, clean, `-j8` | 124.6 s, 95 files |
+| `make test`, every test built | 757 s, 39 binaries |
+| `make test` after `stage/save.cppm`, which only stage includes | 766 s: 38 of 39 rebuilt |
+| one framework file, whole / front end | 3.0 to 8.8 s / 2.7 to 5.5 s |
+| the 47 standard headers squared includes, parsed alone | 4.3 s |
+| the same files with those precompiled, whole / front end | 0.9 to 5.8 s / 0.6 to 2.7 s |
+
+So two changes, decided with the user (plan, 7b):
+
+**A test depends on what it includes.** Tests are built through
+`tools/test_cc.sh` (`TEST_CXX`, `build/common.mk`), which takes the
+compile-and-link a recipe would have run, compiles each source on its own
+with `-MMD` (one command with several sources keeps only the last one's
+dependencies), links the objects, and writes `<binary>.d`; each module
+includes its tests' `.d` files. After `stage/save.cppm`: the two stage tests,
+where it was 38. The objects are kept in `build/<BUILD>/test-objects/<key>/`,
+the key a checksum of the compiler, the flags and the precompiled header, and
+shared between tests: the tests had compiled the same sources 230 times for
+39 binaries (`dev_log.cpp` into 13 of them, each Console source into 6). An
+object is used again when nothing its `.d` names, nor the precompiled header,
+is newer; each is written beside its name and renamed into place, so two tests
+building at once under `-j` cannot leave half of one. Here (x86, 2 cores):
+the first `make test` 214 s to 150 s.
+
+**The standard headers are precompiled.** `build/std_pch.hpp` names every
+standard header the sources include (written by `tools/std_pch.sh`; `make
+headers` runs its `--check`, which fails when a source includes one the list
+lacks). It is compiled once per flag set, `-MD` so a new libc++ makes it
+again: `build/<BUILD>/pch/std.pch` with `SQUARED_CXXFLAGS` for the objects
+(the root `Makefile` makes it before the modules, which build at once under
+`-j`), `std-test.pch` with `TESTFLAGS` and `-pthread` for the tests (clang
+refuses a precompiled header made with the other thread choice; every test
+source is compiled with `-pthread` for it). Every object and test source is
+compiled with `-include-pch`. 22 MB each on the phone. clang only; `make
+SQUARED_PCH=off` turns it off, and g++ builds as before. The flags stamp now
+names the tests' flags, the choice and the compiler's version, so a new
+clang makes everything again (a precompiled header from another version is
+refused).
+
+**Its templates instantiated once (7b.4).** A precompiled header leaves
+pending the templates its own headers instantiate among themselves
+(`std::format`'s machinery, `<cmath>`'s special functions, `<chrono>`'s
+clocks), and clang instantiated them again at the end of every file that
+included it, used or not. A `-ftime-trace` of all 91 host-built framework
+files (2026-10-27, x86, clang 18, libstdc++): instantiation was 54% of the
+compile time, `std::vformat_to` alone 27% (265 times, about 3 a file), the
+special functions twice in every file. Both precompiled headers are now made
+with `-fpch-instantiate-templates` (`SQUARED_PCH_FLAGS`; CMake passes the
+same for clang), which does it once, there: the instantiation share fell to
+15%, and the framework clean, `-j8`, from 51 s to 34 s. The flags stamp says
+`pch:on-fpch-instantiate-templates`, and the build cache keys objects by it
+(`SQUARED_CACHE_SALT`), so no object from the old header is reused. Every
+test passes with it. The phone (libc++) is measured by `measure_build.sh`.
+
+What the precompiled header costs: every source sees all 47 headers, so a
+`.cpp` that forgets `#include <vector>` still builds here. `make lint`
+(clang-tidy, which compiles without it) and `make headers` (each header
+alone, without it) still catch that. A pattern, in effect: a Flyweight of the
+standard library's parse, shared by every file of one configuration.
+
+`make headers` runs one compile per core by default (`nproc`; `JOBS=1` for
+one at a time). The printed steps of a package no longer run `make
+docs-check` after `make docs`, which has just written the pages it checks.
+
+Not done then: `import std`. Termux's libc++ ships no `std.cppm`; the NDK's
+does (`toolchains/llvm/prebuilt/linux-arm64/share/libc++/v1/`), and it failed
+to build against the NDK's headers as tried (`std/cctype.inc:11`). Done on
+2026-11-02: the NDK's sources pinned in `third_party/libcxx/`, and
+`-D__BIONIC_CTYPE_INLINE=inline` for the ctype functions
+([modules.md](modules.md#std)).
+
+**The link check** (template `Makefile`, `verify-link`) refuses a library that
+needs `libc++_shared.so` (the runtime was not linked in) and, when
+`SQ_MIN_SDK` is below 23, one without `DT_HASH`.
+
+## The build cache (7b.3)
+
+*Since 7b.4 the precompiled header named below is gone, and an object's key
+also holds the sources of the module interfaces it may import (by the
+`.sum` beside each `.inputs` list), and interface units and the umbrella are
+cached with their BMIs: [modules.md](modules.md#the-build-cache).*
+
+A fresh workspace compiled all 95 framework files, though the device had
+compiled the very same files with the same compiler and flags in the last
+workspace; so did `make clean`, and the project's own clean when its flags
+change and change back. Now every framework object is compiled through
+`tools/cached_cc.sh` (`SQUARED_CC`, `build/common.mk`), which keeps the
+object in a cache keyed by what the compile read, and takes it from there
+when a compile would read the same again. Tests stay on `tools/test_cc.sh`
+(above), which shares their objects within one workspace.
+
+Decided with the user (plan, 7b.3): one cache for every workspace in a
+squared-pg tree, `~/sqsysroot/.sqpg/cache`, and a tree without squared-pg's
+directory gets the workspace's own `build/cache` (outside
+`build/<BUILD>/`, so `make clean` keeps it); keyed by the content of what
+each compile reads; a cap, oldest out, 500 MB by default; filled lazily, by
+builds (squared-pg's `initialize` fills nothing). squared's source stays in
+each workspace, as before: only objects are shared.
+
+**The key.** Two steps, as ccache's direct mode:
+
+- `k1`, an md5 of the compiler's version line, the flags, the source's path
+  and the source's content. The workspace's own directory (`PUBLIC_ROOT`,
+  the one holding `squared/`) is written `@ROOT@` in the flags and paths, so
+  two workspaces compiling the same file with the same flags have one `k1`.
+- `manifests/<k1>/` holds what such a compile read, one list per set of
+  headers seen (a list is the `.d`, one file a line, `@ROOT@` for the
+  workspace), up to 4: an old workspace and a new one with different includes
+  do not push each other out.
+- `k2`, an md5 of `k1` and what each file of a list holds now: squared's own
+  files by content (`md5sum`; a vendored copy is dated when it was copied,
+  so its dates say nothing), the compiler's and the system's by size and
+  date (`stat`; they change only with a package update, and hashing 400
+  system headers for every object would cost more than a compile). The
+  object is `objects/<k2>.o`.
+
+A lookup tries each list, newest first: a `k2` with an object is a hit, and
+the object is copied out and the list written as the workspace's `.d`, with
+its paths. A miss compiles, with `-MD -MP` (system headers too: a new libc++
+or NDK rebuilds), then stores the list and the object. The precompiled
+header needs no key of its own: a compile with it lists `build/std_pch.hpp`
+and every standard header it pulls, and its flags are the object's.
+
+**Objects that do not name their workspace.** `SQUARED_CXXFLAGS` carries
+`-ffile-prefix-map=<PUBLIC_ROOT>/=`, so the paths an object holds (debug
+information, `__FILE__`) start at `squared/`. Checked here: two workspaces,
+95 objects, byte for byte the same. The cost is to debugging: gdb finds the
+sources from the workspace's directory (`directory <it>`, or run it there),
+and `addr2line` prints `squared/gui/src/ui.cpp:42`.
+
+**Never half a file.** Each file is written beside its name (`.<name>.<pid>`)
+and renamed into place, so builds at once under `-j`, or in two workspaces,
+share the cache safely; a lookup that loses a race (an object pruned between
+finding and copying it) compiles. An object is not stored when one of
+squared's files it read changed while it compiled (newer than a mark made as
+the compile started): it would be of neither version.
+
+**The cap.** The root `Makefile`'s `all` runs `tools/cache_prune.sh` after
+the modules: one `du` when under `SQUARED_CACHE_SIZE` (megabytes, 500); over
+it, the files used least lately go first, objects and lists alike, to nine
+tenths (so the next build does not prune again). A hit touches the object and
+its list.
+
+**Measured here** (x86, 8 jobs, clang 18): the framework into an empty cache
+58 s (the script costs nothing visible); a second workspace 5.8 s, every
+object from the cache; `make clean` then `make` 6.0 s, most of it the
+precompiled header, which each workspace makes itself; a header edited, its
+6 includers compiled, and edited back, the 6 from the cache; one at a time
+(`-j1`) a hit is about 40 ms. 95 objects and their lists, release: 6.5 MB, so
+500 MB holds some 70 configurations (release, debug, the NDK's, each version
+of squared). g++ builds use it too, under their own keys.
+
+What it allocates: nothing in a squared program; on disk, at most
+`SQUARED_CACHE_SIZE`. Patterns: a content-addressed store (Memoization of the
+compiler, keyed by its inputs); nothing from the standard library (it is
+shell).
+
+Known limits. A header that would now be found first on the include path,
+where an older one was found before, is not seen (the list names what was
+read, not what was looked for); ccache's direct mode has the same hole, and
+`make SQUARED_CACHE=off` or deleting the cache settles it. A path with a
+space in it is split. The precompiled header is not cached (clang checks
+the headers it was made from by path and date, so another workspace's would
+be refused).
+
+## Android: debuggable builds and adb
+
+Both live in the template's generated `mk/squared_android_package.mk` and its
+`tools/device.sh`, not in this tree; they are recorded here because they
+decide how every squared app is installed and read during development
+(Sprint 4, tasks 4.8 and 4.8b, 2026-10-19).
+
+**Debuggable.** `SQ_DEBUGGABLE` defaults to on when `DEV_LOG` is set or
+`CONSOLE` is not `0`, and adds `--debug-mode` to `aapt2 link`, which writes
+`android:debuggable="true"` into the linked manifest. The project's manifest
+is never edited, so a release cannot inherit it. The link rule reads the
+manifest back (`aapt2 dump xmltree`) and fails the build when the attribute
+is missing; an `aapt2` that cannot print the manifest only says so. The
+setting is stamped (`build/apk/.link-flags`), so switching it relinks the APK
+and recompiles nothing. Why: `run-as`, and later a native debugger or
+simpleperf, reach only debuggable apps. The cost is in the Java runtime,
+which keeps its debugging support on for such a process; this app's code is
+the same machine code. Memory is measured on builds that are not debuggable.
+
+**Which device.** `tools/device.sh` decides, so every target (`install`,
+`run`, `logcat`, `uninstall`, `devices`) agrees:
+
+1. `DEVICE=<serial>`, when set, and it must be attached; otherwise an error
+   listing what is.
+2. Otherwise **this phone**: the attached device whose
+   `ro.build.fingerprint` equals the one Termux reads with `getprop`. A
+   Wireless Debugging connection shows up under several serials
+   (`localhost:<port>`, the Wi-Fi address, an mDNS name), so the serial is no
+   test; the fingerprint is the same for all of them and differs on the
+   tablet. Two phones of one model on one build would look alike; accepted.
+3. Only when adb's server is already running. Asking `adb devices` would
+   start one, which wakes whatever is plugged in; a bash `/dev/tcp`
+   connection to the server's port (`ANDROID_ADB_SERVER_PORT`, 5037) asks
+   without starting anything. `connect` and a named `DEVICE` start it,
+   because they were asked to.
+4. Off Android (no `getprop`), the one attached device, as plain
+   `adb install` would.
+
+With no device, `install` falls back to the package installer (`termux-open`),
+exactly as before 4.8b; `run`, `logcat` and `run-as` refuse with the steps to
+connect. `run` starts the app with the launcher's own intent (`monkey -p
+<package> -c LAUNCHER 1`), so it needs no activity name and starts whichever
+activity a monitor build makes the launcher. `logcat` filters to the app's tag
+plus `AndroidRuntime` (a library that failed to load is a Java exception
+there), `DEBUG` (the crash summary) and `libc` (an abort's message): Termux's
+own `logcat` sees only Termux's lines, so the old `make logcat` showed
+nothing.
+
+**Checked** (here, 2026-10-19): shellcheck clean; 29 scenarios against a fake
+`adb`, `getprop` and `termux-open` (no adb, server down, this phone among two,
+only the tablet, a named device, a named device that is absent, desktop with
+one and with two devices, run, logcat, run-as, connect by mDNS and by port,
+uninstall); two planted bugs (any device taken as this phone; the server not
+checked) each failed several. The link rule against a fake `aapt2`: the
+attribute found, missing (build fails, APK removed), unprintable (noted,
+build goes on); toggling relinks only. Not checkable here: the real `aapt2`
+and `adb`.
+
+## `SQUARED_ABI`
+
+`SQUARED_ABI` carries the ABI-shrinking flags.
+
+`-fno-rtti` builds clean for this tree and is verified, tests included
+(since 2026-10-20 they build with `SQUARED_ABI` too; clang, all 22 pass):
+
+```sh
+make SQUARED_ABI=-fno-rtti test
+```
+
+It is not the default because `sq::app` and `sq::data` live
+outside this archive and have not been checked with it. Turn it on once they
+are.
+
+`-fno-exceptions` does not build yet: **21 remaining errors**, catalogued by
+kind in [priority-audit.md](priority-audit.md) item 3. One of them is outside
+this archive &mdash; `skin_loader.cpp` calls into `sq::data`, so that
+module has to be exception-free first.
+
+## External modules
+
+`sq::gui` names `sq::app` (event and text-input) and
+`sq::data` (JSON, used by the skin loader). Neither is in this archive.
+
+```sh
+SQUARED_EXTERNAL_INCLUDES="-I../application/include -I../data/include" make
+```
+
+## clang-format and clang-tidy
+
+Both run through `make lint` ([lint.md](lint.md)). The tree was formatted in
+one commit with clang-format 21 (`244cc13`, listed in the repo's
+`.git-blame-ignore-revs`); the rules are in [code-style.md](code-style.md).
+`tools/format.sh` reformats. clang-tidy analyses what this build compiles, with
+the flags above minus the warnings, read from the Makefiles, so a flag changed
+here changes what it analyses too.
+
+## Checking the headers
+
+```sh
+make headers          # bash tools/check_modules.sh
+```
+
+Since 7b.4 there are no headers to compile alone: an interface compiles
+alone by construction, and the self-containment check went (the user's call,
+2026-10-27). What `make headers` checks now, in seconds, with no compile:
+
+1. **The pinned std sources are what `PINNED` says**: each file of
+   `third_party/libcxx/` against its sha256 (since 2026-11-02; until then,
+   that sq.std named every `std::` name the sources used).
+2. **The build order covers every import**: each module that a module's files
+   import is built before it, by the top Makefile's order lines. Under `make
+   -j` a missing line would race the BMI it needs.
+3. **Every interface is named for its path** (`tools/module_deps.sh`, for
+   every module at once).
+
+Exit status is 0 when all pass, 1 when one fails. Until 7b.4 this was
+`tools/check_headers.sh`, which checked that every header under `src/` was
+reached from a module root, and compiled each public header alone (minutes
+on the phone, a dot per header).

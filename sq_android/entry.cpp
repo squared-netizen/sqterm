@@ -1,0 +1,2021 @@
+// sqterm — Android platform entry point.
+//
+// This file is YOURS (ownership class: seeded). The generator wrote it once and
+// will not overwrite it. It is the expert escape hatch: everything about how
+// this project meets Android is here, and you may change all of it.
+//
+// You should not normally need to. Application code goes in sq_app/, which
+// includes no Android header and compiles unchanged under other templates.
+//
+// What this file does:
+//
+//   * runs the android_native_app_glue event loop
+//   * owns the sq::graphics::Context and its surface lifetime
+//   * owns the file system and asset manager, and hands the application a
+//     sq::app::Runtime referring to all three
+//   * runs your app through sq::App, which lives as long as the process: an
+//     activity Android makes again reattaches to it, and your model runs on
+//   * translates NativeActivity lifecycle and input into sq::app::Event
+//   * hides the system bars (immersive) unless the application says not to,
+//     on Android's UI thread, which this file reaches without Java (below)
+//   * measures what covers the window - a camera cut-out, the keyboard, the
+//     bars when shown - and tells the application (sq::app::SafeArea), on
+//     events only: a new window, a rotation, the bars hidden, the keyboard
+//   * hands Android the application's screens to keep with the activity (its
+//     saved instance state), and gives them back when Android brings it back
+//   * sends the app to the background when it asks (back at its root screen)
+//   * measures frame time and drives update() separately from render()
+//   * shows the soft keyboard for a text field and turns key presses into
+//     typed text (android_text.cpp: the Java side, through JNI)
+//
+// There is no longer an "is a renderer present" question. sq::graphics::Context
+// always exists; which backend answers it is chosen at link time, and the null
+// backend draws nothing rather than failing to link. A project with no GLES
+// gets a black window and a log line, which is what the old __has_include
+// guard was for.
+
+#include <android/configuration.h>
+#include <android/keycodes.h>
+#include <android/log.h>
+#include <android/looper.h>
+#include <android_native_app_glue.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <jni.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <unistd.h>
+
+#include "android_text.hpp"
+
+import sq.app;
+import sq.assets;
+import sq.files;
+import sq.graphics;
+import sq.stage;
+import std;
+
+
+// Development builds only (`make DEV_LOG=1`): every log line below is also sent
+// to a UDP port on this device, a fatal signal sends a backtrace, and frames
+// whose update() or render() allocate are reported. The value of
+// SQUARED_DEV_LOG is the port. Nothing of this exists in a normal build.
+#ifdef SQUARED_DEV_LOG
+import sq.dev;
+#endif
+
+// The in-app Console (`make CONSOLE=app`): drawn over the application's frame,
+// and reachable from Termux through its bridge (`make console`; below),
+// showing the log - with DEV_LOG, every dev log line of the main thread, the
+// application's included; without, the lines below. Nothing of it exists in a
+// CONSOLE=0 build. For now it only shows: the keyboard and the gesture that
+// opens it come later (Sprint 4.5), so it is open from the start and its [x]
+// closes it for the rest of the run.
+#ifdef SQUARED_CONSOLE
+import sq.console;
+#endif
+
+#if defined(SQUARED_DEV_LOG) || defined(SQUARED_CONSOLE)
+#endif
+
+namespace {
+
+constexpr const char* kTag = "sqterm";
+
+#if defined(SQUARED_CONSOLE) && defined(SQUARED_DEV_LOG)
+/// The dev log's listener while the platform exists: every dev log line made
+/// on this thread - these, the application's, the allocation reports - is
+/// printed into the Console as well.
+void console_listener(void* context, sq::dev::LogLevel level, std::string_view line) noexcept {
+    static_cast<sq::console::Console*>(context)->print(
+        line, level == sq::dev::LogLevel::Error     ? sq::console::Level::error
+              : level == sq::dev::LogLevel::Warning ? sq::console::Level::warning
+                                                    : sq::console::Level::info);
+}
+#elif defined(SQUARED_CONSOLE)
+/// Without the dev log, the lines below go to the Console directly: the
+/// platform's, while it exists. Lines logged before (the first one) or after
+/// are not shown in it.
+sq::console::Console* console_sink = nullptr;
+#endif
+
+#if defined(SQUARED_DEV_LOG) || defined(SQUARED_CONSOLE)
+/// Format a log line once, into the stack, and hand it to the dev log (whose
+/// listener feeds the Console) or, without one, to the Console.
+__attribute__((format(printf, 2, 3))) void mirror(int priority, const char* format, ...) {
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    const int length = std::vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    if (length <= 0) return;
+    const std::string_view text{line, static_cast<std::size_t>(length) < sizeof(line)
+                                          ? static_cast<std::size_t>(length)
+                                          : sizeof(line) - 1};
+#ifdef SQUARED_DEV_LOG
+    sq::dev::log_line(text, priority >= ANDROID_LOG_WARN ? sq::dev::LogLevel::Warning
+                                                         : sq::dev::LogLevel::Info);
+#else
+    if (console_sink != nullptr) {
+        console_sink->print(text, priority >= ANDROID_LOG_WARN ? sq::console::Level::warning
+                                                                : sq::console::Level::info);
+    }
+#endif
+}
+#define SQ_MIRROR(priority, ...) mirror(priority, __VA_ARGS__)
+#else
+#define SQ_MIRROR(...) ((void)0)
+#endif
+
+#define SQ_LOGI(...) \
+    (__android_log_print(ANDROID_LOG_INFO, kTag, __VA_ARGS__), \
+     SQ_MIRROR(ANDROID_LOG_INFO, __VA_ARGS__))
+#define SQ_LOGW(...) \
+    (__android_log_print(ANDROID_LOG_WARN, kTag, __VA_ARGS__), \
+     SQ_MIRROR(ANDROID_LOG_WARN, __VA_ARGS__))
+
+#ifdef SQUARED_DEV_LOG
+// Runs when the library loads, before any static initializer of ours, so a
+// crash while the framework is starting up is still reported. Priority 101 is
+// the earliest user-level slot.
+__attribute__((constructor(101))) void open_dev_log() {
+    const auto status = sq::dev::open_log_sink({.port = SQUARED_DEV_LOG});
+    if (status == sq::dev::LogSinkStatus::Opened) {
+        SQ_LOGI("dev log: sending to 127.0.0.1:%d", static_cast<int>(SQUARED_DEV_LOG));
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, kTag,
+                            "dev log: socket refused; is INTERNET in the manifest?");
+    }
+}
+#endif
+
+using Event = sq::app::Event;
+using Key = sq::app::Key;
+using Navigation = sq::app::Navigation;
+using Clock = std::chrono::steady_clock;
+
+/// Translate an Android keycode into squared's portable key.
+///
+/// Only the keys squared names. Everything else arrives as Key::unknown with
+/// the Android code still in input_device_id, so an application that needs a
+/// key squared does not name can still find it.
+Key translate_key(std::int32_t code) {
+    switch (code) {
+        case AKEYCODE_DPAD_LEFT:  return Key::left;
+        case AKEYCODE_DPAD_RIGHT: return Key::right;
+        case AKEYCODE_DPAD_UP:    return Key::up;
+        case AKEYCODE_DPAD_DOWN:  return Key::down;
+        case AKEYCODE_MOVE_HOME:  return Key::home;
+        case AKEYCODE_MOVE_END:   return Key::end;
+        case AKEYCODE_DEL:        return Key::backspace;
+        case AKEYCODE_FORWARD_DEL:return Key::delete_key;
+        case AKEYCODE_ENTER:
+        case AKEYCODE_NUMPAD_ENTER:
+        case AKEYCODE_DPAD_CENTER:return Key::enter;
+        case AKEYCODE_SPACE:      return Key::space;
+        case AKEYCODE_TAB:        return Key::tab;
+        case AKEYCODE_ESCAPE:     return Key::escape;
+        case AKEYCODE_PAGE_UP:    return Key::page_up;
+        case AKEYCODE_PAGE_DOWN:  return Key::page_down;
+        case AKEYCODE_INSERT:     return Key::insert;
+        case AKEYCODE_F1:         return Key::f1;
+        case AKEYCODE_F2:         return Key::f2;
+        case AKEYCODE_F3:         return Key::f3;
+        case AKEYCODE_F4:         return Key::f4;
+        case AKEYCODE_F5:         return Key::f5;
+        case AKEYCODE_F6:         return Key::f6;
+        case AKEYCODE_F7:         return Key::f7;
+        case AKEYCODE_F8:         return Key::f8;
+        case AKEYCODE_F9:         return Key::f9;
+        case AKEYCODE_F10:        return Key::f10;
+        case AKEYCODE_F11:        return Key::f11;
+        case AKEYCODE_F12:        return Key::f12;
+        default:                  return Key::unknown;
+    }
+}
+
+/// Translate an Android keycode into a semantic navigation action.
+///
+/// A D-pad or a game controller drives focus movement without the application
+/// having to know which key did it. This is what makes a squared GUI navigable
+/// on a TV or with a gamepad attached.
+Navigation translate_navigation(std::int32_t code) {
+    switch (code) {
+        case AKEYCODE_DPAD_LEFT:  return Navigation::left;
+        case AKEYCODE_DPAD_RIGHT: return Navigation::right;
+        case AKEYCODE_DPAD_UP:    return Navigation::up;
+        case AKEYCODE_DPAD_DOWN:  return Navigation::down;
+        case AKEYCODE_TAB:        return Navigation::next;
+        case AKEYCODE_DPAD_CENTER:
+        case AKEYCODE_ENTER:      return Navigation::activate;
+        case AKEYCODE_BACK:
+        case AKEYCODE_ESCAPE:     return Navigation::cancel;
+        default:                  return Navigation::unknown;
+    }
+}
+
+sq::app::KeyModifiers translate_modifiers(std::int32_t state) {
+    return {.shift = (state & AMETA_SHIFT_ON) != 0,
+            .control = (state & AMETA_CTRL_ON) != 0,
+            .alt = (state & AMETA_ALT_ON) != 0,
+            .meta = (state & AMETA_META_ON) != 0};
+}
+
+// ---------------------------------------------------------------------------
+// Safe area: how far the status bar, the navigation bar and a camera cut-out
+// reach into the window.
+//
+// Since Android 15 an application draws edge to edge, so those bars sit on top
+// of the surface. NativeActivity offers no call for their size, so it is asked
+// of the Java side: Activity -> Window -> decor view -> root window insets.
+// Every step can fail (no window yet, a method missing on an old release), and
+// every failure means "nothing is covering the window" - the application then
+// behaves as it did before this existed.
+// ---------------------------------------------------------------------------
+
+/// Call an object-returning method that takes no arguments. Null on any failure.
+jobject call_object(JNIEnv* env, jobject target, const char* name, const char* signature) {
+    if (target == nullptr) return nullptr;
+    jclass type = env->GetObjectClass(target);
+    jmethodID method = type != nullptr ? env->GetMethodID(type, name, signature) : nullptr;
+    jobject result = method != nullptr ? env->CallObjectMethod(target, method) : nullptr;
+    if (type != nullptr) env->DeleteLocalRef(type);
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+    return result;
+}
+
+/// Call an int-returning method that takes no arguments. `fallback` on any failure.
+jint call_int(JNIEnv* env, jobject target, const char* name, jint fallback) {
+    if (target == nullptr) return fallback;
+    jclass type = env->GetObjectClass(target);
+    jmethodID method = type != nullptr ? env->GetMethodID(type, name, "()I") : nullptr;
+    const jint result = method != nullptr ? env->CallIntMethod(target, method) : fallback;
+    if (type != nullptr) env->DeleteLocalRef(type);
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return fallback;
+    }
+    return result;
+}
+
+/// Call a void method that takes one int. False on any failure.
+bool call_void_int(JNIEnv* env, jobject target, const char* name, jint value) {
+    if (target == nullptr) return false;
+    jclass type = env->GetObjectClass(target);
+    jmethodID method = type != nullptr ? env->GetMethodID(type, name, "(I)V") : nullptr;
+    if (method != nullptr) env->CallVoidMethod(target, method, value);
+    if (type != nullptr) env->DeleteLocalRef(type);
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return false;
+    }
+    return method != nullptr;
+}
+
+#ifdef SQUARED_CONSOLE
+/// The boolean extra `name` of the intent that started the activity; false
+/// when there is none or anything fails. `make console-only` sets
+/// squared.console_only.
+bool intent_flag(JNIEnv* env, jobject activity, const char* name) {
+    if (env == nullptr) return false;
+    jobject intent = call_object(env, activity, "getIntent", "()Landroid/content/Intent;");
+    if (intent == nullptr) return false;
+    jclass type = env->GetObjectClass(intent);
+    jmethodID get = type != nullptr
+                        ? env->GetMethodID(type, "getBooleanExtra", "(Ljava/lang/String;Z)Z")
+                        : nullptr;
+    jstring key = env->NewStringUTF(name);
+    const jboolean value = get != nullptr && key != nullptr
+                               ? env->CallBooleanMethod(intent, get, key, JNI_FALSE)
+                               : JNI_FALSE;
+    if (env->ExceptionCheck() != JNI_FALSE) env->ExceptionClear();
+    if (key != nullptr) env->DeleteLocalRef(key);
+    if (type != nullptr) env->DeleteLocalRef(type);
+    env->DeleteLocalRef(intent);
+    return value == JNI_TRUE;
+}
+#endif
+
+std::int16_t to_pixels(jint value) {
+    return static_cast<std::int16_t>(std::clamp<jint>(value, 0, 4096));
+}
+
+/// This process's name, such as "com.example.app" or "com.example.app:console":
+/// the first string in /proc/self/cmdline, which Android sets to the process
+/// name from the manifest. One open and one read, once, at start. Empty if
+/// the file cannot be read.
+void process_name(char* out, std::size_t size) {
+    out[0] = '\0';
+    const int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    const ssize_t got = read(fd, out, size - 1);
+    close(fd);
+    out[got > 0 ? static_cast<std::size_t>(got) : 0] = '\0';
+}
+
+/// The releases the safe-area query needs. View.getRootWindowInsets() arrived
+/// in API 23 and WindowInsets.getDisplayCutout() in API 28. Below 23 the bars
+/// sit outside the window, so there is nothing to measure; asking anyway made
+/// the method lookup fail, and Java build and throw an error, on every query.
+constexpr int kInsetsApi = 23;
+constexpr int kCutoutApi = 28;
+
+#ifdef SQUARED_CONSOLE
+/// The screen's density in dpi. A configuration without a number (default,
+/// any, none) counts as 160.
+int screen_dpi(AConfiguration* config) {
+    const std::int32_t dpi = config != nullptr ? AConfiguration_getDensity(config) : 0;
+    return dpi <= 0 || dpi >= ACONFIGURATION_DENSITY_ANY ? ACONFIGURATION_DENSITY_MEDIUM
+                                                          : static_cast<int>(dpi);
+}
+
+/// The Console's character cell: 8 pixels for each 160 dpi, rounded, so the
+/// 8-pixel font is only ever scaled by whole steps.
+int console_cell(int dpi) {
+    return 8 * std::max(1, (dpi + 80) / 160);
+}
+#endif
+
+/// Read the insets of the activity's window, in pixels, from API 23. Zero when
+/// unavailable; below kInsetsApi, measure_visible_frame() answers instead.
+///
+/// The system-window insets already include a cut-out on current releases; the
+/// cut-out's own safe insets are folded in with max() for the releases where
+/// they do not. No allocation on our side. Each call makes a handful of JNI
+/// calls and deletes every local reference it creates, so it is cheap enough
+/// to repeat twice a second.
+sq::app::SafeArea measure_safe_area(JNIEnv* env, jobject activity, int api_level) {
+    sq::app::SafeArea area;
+    if (env == nullptr || activity == nullptr || api_level < kInsetsApi) return area;
+
+    jobject window = call_object(env, activity, "getWindow", "()Landroid/view/Window;");
+    jobject decor = call_object(env, window, "getDecorView", "()Landroid/view/View;");
+    jobject insets = call_object(env, decor, "getRootWindowInsets",
+                                 "()Landroid/view/WindowInsets;");
+    if (insets != nullptr) {
+        jint left = call_int(env, insets, "getSystemWindowInsetLeft", 0);
+        jint top = call_int(env, insets, "getSystemWindowInsetTop", 0);
+        jint right = call_int(env, insets, "getSystemWindowInsetRight", 0);
+        jint bottom = call_int(env, insets, "getSystemWindowInsetBottom", 0);
+
+        jobject cutout = api_level >= kCutoutApi
+            ? call_object(env, insets, "getDisplayCutout", "()Landroid/view/DisplayCutout;")
+            : nullptr;
+        if (cutout != nullptr) {
+            left = std::max(left, call_int(env, cutout, "getSafeInsetLeft", 0));
+            top = std::max(top, call_int(env, cutout, "getSafeInsetTop", 0));
+            right = std::max(right, call_int(env, cutout, "getSafeInsetRight", 0));
+            bottom = std::max(bottom, call_int(env, cutout, "getSafeInsetBottom", 0));
+            env->DeleteLocalRef(cutout);
+        }
+        area = {to_pixels(left), to_pixels(top), to_pixels(right), to_pixels(bottom)};
+        env->DeleteLocalRef(insets);
+    }
+    if (decor != nullptr) env->DeleteLocalRef(decor);
+    if (window != nullptr) env->DeleteLocalRef(window);
+    return area;
+}
+
+/// Below API 23: what the window shows, from View.getWindowVisibleDisplayFrame
+/// (API 1), as insets against the decor view's size. Some older devices lay the
+/// window out under translucent bars (the Android 5.1 tablet does: its status
+/// and navigation bars draw over the app); there this is where the bars are,
+/// and on the rest it is zero. It shrinks with the keyboard, as the newer
+/// insets do.
+///
+/// The class, method and field ids and one Rect are looked up and made once,
+/// on the first call, and kept: after that each measurement is five JNI calls
+/// and allocates nothing on either side.
+sq::app::SafeArea measure_visible_frame(JNIEnv* env, jobject activity) {
+    struct Ids {
+        bool tried{false};
+        jobject rect{nullptr};  // a global reference
+        jmethodID visible{nullptr};
+        jmethodID width{nullptr};
+        jmethodID height{nullptr};
+        jfieldID left{nullptr};
+        jfieldID top{nullptr};
+        jfieldID right{nullptr};
+        jfieldID bottom{nullptr};
+    };
+    static Ids ids;
+    sq::app::SafeArea area;
+    if (env == nullptr || activity == nullptr) return area;
+    if (!ids.tried) {
+        ids.tried = true;
+        jclass rect_class = env->FindClass("android/graphics/Rect");
+        jclass view_class = env->FindClass("android/view/View");
+        if (rect_class != nullptr && view_class != nullptr) {
+            jmethodID make = env->GetMethodID(rect_class, "<init>", "()V");
+            jobject rect = make != nullptr ? env->NewObject(rect_class, make) : nullptr;
+            if (rect != nullptr) {
+                ids.rect = env->NewGlobalRef(rect);
+                env->DeleteLocalRef(rect);
+            }
+            ids.left = env->GetFieldID(rect_class, "left", "I");
+            ids.top = env->GetFieldID(rect_class, "top", "I");
+            ids.right = env->GetFieldID(rect_class, "right", "I");
+            ids.bottom = env->GetFieldID(rect_class, "bottom", "I");
+            ids.visible = env->GetMethodID(view_class, "getWindowVisibleDisplayFrame",
+                                           "(Landroid/graphics/Rect;)V");
+            ids.width = env->GetMethodID(view_class, "getWidth", "()I");
+            ids.height = env->GetMethodID(view_class, "getHeight", "()I");
+        }
+        if (rect_class != nullptr) env->DeleteLocalRef(rect_class);
+        if (view_class != nullptr) env->DeleteLocalRef(view_class);
+        if (env->ExceptionCheck() != JNI_FALSE) env->ExceptionClear();
+    }
+    if (ids.rect == nullptr || ids.visible == nullptr || ids.width == nullptr ||
+        ids.height == nullptr || ids.left == nullptr || ids.top == nullptr ||
+        ids.right == nullptr || ids.bottom == nullptr) {
+        return area;
+    }
+
+    jobject window = call_object(env, activity, "getWindow", "()Landroid/view/Window;");
+    jobject decor = call_object(env, window, "getDecorView", "()Landroid/view/View;");
+    if (decor != nullptr) {
+        env->CallVoidMethod(decor, ids.visible, ids.rect);
+        const jint width = env->CallIntMethod(decor, ids.width);
+        const jint height = env->CallIntMethod(decor, ids.height);
+        if (env->ExceptionCheck() != JNI_FALSE) {
+            env->ExceptionClear();
+        } else if (width > 0 && height > 0) {
+            const jint left = env->GetIntField(ids.rect, ids.left);
+            const jint top = env->GetIntField(ids.rect, ids.top);
+            const jint right = env->GetIntField(ids.rect, ids.right);
+            const jint bottom = env->GetIntField(ids.rect, ids.bottom);
+            area = {to_pixels(left), to_pixels(top), to_pixels(width - right),
+                    to_pixels(height - bottom)};
+        }
+        env->DeleteLocalRef(decor);
+    }
+    if (window != nullptr) env->DeleteLocalRef(window);
+    return area;
+}
+
+/// Tell an application about the safe area, if it has a use for it.
+///
+/// An application written before SafeArea existed has no such method; the
+/// requires-expression lets it keep compiling rather than forcing an edit.
+template <class Application>
+void notify_safe_area(Application& application, const sq::app::SafeArea& area) {
+    if constexpr (requires { application.safe_area_changed(area); }) {
+        application.safe_area_changed(area);
+    }
+}
+
+/// Storage roots from the activity.
+///
+/// Android's "internal storage" - internalDataPath - is squared's Local:
+/// private, writable, no permission needed, removed on uninstall. squared's
+/// Internal is the read-only asset bundle inside the APK, which the file
+/// system reaches through the asset manager instead.
+///
+/// externalDataPath is null when external storage is not mounted. An empty
+/// root makes every External path fail cleanly rather than resolve somewhere
+/// unintended.
+sq::files::AndroidStorageRoots storage_roots(const android_app* native) {
+    const ANativeActivity* activity = native->activity;
+    return sq::files::AndroidStorageRoots{
+        .local_root = activity->internalDataPath != nullptr
+                          ? activity->internalDataPath : "",
+        .external_root = activity->externalDataPath != nullptr
+                             ? activity->externalDataPath : ""};
+}
+
+// ---------------------------------------------------------------------------
+// The UI thread: Android's main thread. A window's views belong to it, so the
+// calls that hide the system bars must run there, while everything else in
+// this file runs on the glue's thread. The manifest names squared_on_create
+// (android.app.func_name) as the activity's entry: it runs on the UI thread,
+// adds a pipe to that thread's looper, then starts the glue as its own entry
+// would have. The glue's thread writes a byte into the pipe, a job; the UI
+// thread runs it. No Java: a few JNI calls, on the thread they belong to.
+// After the start, nothing is allocated: a job is one byte in a pipe.
+// ---------------------------------------------------------------------------
+
+enum class UiJob : std::uint8_t {
+    hide_bars = 1,
+    show_bars = 2,
+    to_back = 3,
+};
+
+/// One activity's way to its UI thread.
+struct UiThread {
+    std::atomic<ANativeActivity*> activity{nullptr};
+    int read_fd{-1};
+    int write_fd{-1};
+};
+
+/// Two: Android may make the next activity before the last one is destroyed.
+std::array<UiThread, 2> ui_threads;
+
+/// The glue's onDestroy, which squared_on_destroy calls first.
+void (*glue_on_destroy)(ANativeActivity*) = nullptr;
+
+/// The flags that hid the bars before API 30 (View.SYSTEM_UI_FLAG_*): hide
+/// both, lay out as if they were hidden, and let a swipe show them a moment.
+constexpr jint kLayoutStable = 0x100, kLayoutHideNavigation = 0x200, kLayoutFullscreen = 0x400;
+constexpr jint kHideNavigation = 0x2, kFullscreen = 0x4, kImmersiveSticky = 0x1000;
+constexpr jint kImmersiveFlags = kLayoutStable | kLayoutHideNavigation | kLayoutFullscreen |
+                                 kHideNavigation | kFullscreen | kImmersiveSticky;
+/// WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE (API 30).
+constexpr jint kTransientBarsBySwipe = 2;
+constexpr int kInsetsControllerApi = 30;
+constexpr int kImmersiveApi = 19;
+
+/// Hide or show the status and navigation bars. UI thread only.
+void set_bars(JNIEnv* env, jobject activity, int api_level, bool hide) {
+    jobject window = call_object(env, activity, "getWindow", "()Landroid/view/Window;");
+    if (window == nullptr) return;
+    if (api_level >= kInsetsControllerApi) {
+        jobject controller = call_object(env, window, "getInsetsController",
+                                         "()Landroid/view/WindowInsetsController;");
+        jclass types = env->FindClass("android/view/WindowInsets$Type");
+        jmethodID bars = types != nullptr ? env->GetStaticMethodID(types, "systemBars", "()I")
+                                          : nullptr;
+        const jint which = bars != nullptr ? env->CallStaticIntMethod(types, bars) : 0;
+        if (env->ExceptionCheck() != JNI_FALSE) env->ExceptionClear();
+        if (controller != nullptr && which != 0) {
+            call_void_int(env, controller, "setSystemBarsBehavior", kTransientBarsBySwipe);
+            call_void_int(env, controller, hide ? "hide" : "show", which);
+        }
+        if (types != nullptr) env->DeleteLocalRef(types);
+        if (controller != nullptr) env->DeleteLocalRef(controller);
+    } else if (api_level >= kImmersiveApi) {
+        jobject decor = call_object(env, window, "getDecorView", "()Landroid/view/View;");
+        call_void_int(env, decor, "setSystemUiVisibility", hide ? kImmersiveFlags : 0);
+        if (decor != nullptr) env->DeleteLocalRef(decor);
+    }
+    env->DeleteLocalRef(window);
+}
+
+/// Activity.moveTaskToBack(true): to the background, as Home does. Any thread.
+void move_task_to_back(JNIEnv* env, jobject activity) {
+    if (env == nullptr || activity == nullptr) return;
+    jclass type = env->GetObjectClass(activity);
+    jmethodID move = type != nullptr ? env->GetMethodID(type, "moveTaskToBack", "(Z)Z") : nullptr;
+    if (move != nullptr) static_cast<void>(env->CallBooleanMethod(activity, move, JNI_TRUE));
+    if (type != nullptr) env->DeleteLocalRef(type);
+    if (env->ExceptionCheck() != JNI_FALSE) env->ExceptionClear();
+}
+
+/// The looper's callback, on the UI thread: run each job waiting in the pipe.
+int on_ui_jobs(int fd, int events, void* data) {
+    auto& thread = *static_cast<UiThread*>(data);
+    ANativeActivity* activity = thread.activity.load(std::memory_order_acquire);
+    std::array<UiJob, 8> jobs{};
+    ssize_t got = 0;
+    while ((got = read(fd, jobs.data(), sizeof(jobs))) > 0) {
+        for (ssize_t i = 0; i < got && activity != nullptr; ++i) {
+            switch (jobs[static_cast<std::size_t>(i)]) {
+                case UiJob::hide_bars:
+                case UiJob::show_bars:
+                    set_bars(activity->env, activity->clazz, activity->sdkVersion,
+                             jobs[static_cast<std::size_t>(i)] == UiJob::hide_bars);
+                    break;
+                case UiJob::to_back:
+                    move_task_to_back(activity->env, activity->clazz);
+                    break;
+            }
+        }
+    }
+    return (events & (ALOOPER_EVENT_HANGUP | ALOOPER_EVENT_ERROR)) != 0 ? 0 : 1;
+}
+
+/// Hand `job` to `activity`'s UI thread. False when it has none (the manifest
+/// does not name squared_on_create), or the pipe is full.
+bool post_ui_job(const ANativeActivity* activity, UiJob job) {
+    for (UiThread& thread : ui_threads) {
+        if (thread.activity.load(std::memory_order_acquire) == activity && thread.write_fd >= 0) {
+            return write(thread.write_fd, &job, 1) == 1;
+        }
+    }
+    return false;
+}
+
+/// After the glue's own: its thread has ended, so nothing writes any more.
+void squared_on_destroy(ANativeActivity* activity) {
+    if (glue_on_destroy != nullptr) glue_on_destroy(activity);
+    for (UiThread& thread : ui_threads) {
+        if (thread.activity.load(std::memory_order_acquire) != activity) continue;
+        ALooper_removeFd(ALooper_forThread(), thread.read_fd);
+        close(thread.read_fd);
+        close(thread.write_fd);
+        thread.read_fd = -1;
+        thread.write_fd = -1;
+        thread.activity.store(nullptr, std::memory_order_release);
+    }
+}
+
+/// The App: one for the whole process, made the first time it is asked for.
+///
+/// Not a member of Platform, which lives as long as one activity. Android can
+/// destroy an activity and make another in the same process, and then the App,
+/// its model's thread and its screens carry on; only the window's half (the
+/// skin's textures, the widgets) is made again. A quit stops the model, so the
+/// next launch, even in this process, starts afresh.
+sq::App& process_app() {
+    static sq::App app;
+    return app;
+}
+
+/// What the App says went wrong: the system log, and the Console when it is
+/// built in, opened so the line is seen.
+void report_line(void* context, std::string_view line) noexcept;
+
+/// Everything the platform layer owns for the lifetime of one activity.
+///
+/// Held in one struct rather than as globals so that the glue's userData
+/// pointer is the only piece of shared state, and so ownership is obvious when
+/// you come to change this file.
+///
+/// Member order is construction order, and it matters here: the asset manager
+/// holds a reference to the file system, and the runtime holds references to
+/// all three services, so each must be declared after what it refers to. The
+/// application comes last, so everything it is handed already exists.
+struct Platform {
+    explicit Platform(android_app* native)
+        : files(*native->activity->assetManager, storage_roots(native))
+        , assets(files)
+        , runtime{graphics, files, assets}
+        , vm(native->activity->vm)
+        , activity(native->activity->clazz)
+        , native_activity(native->activity)
+        , api_level(native->config != nullptr ? AConfiguration_getSdkVersion(native->config) : 0) {
+        // What Android kept for this activity. The glue frees it at the first
+        // resume, before there is a window to start the App in: taken now,
+        // and freed once the App has read it.
+        saved_state.reset(native->savedState);
+        saved_state_size = native->savedState != nullptr ? native->savedStateSize : 0;
+        native->savedState = nullptr;
+        native->savedStateSize = 0;
+        if (!text.create(jni(), native->activity)) {
+            SQ_LOGW("text: the keyboard, key characters or the clipboard is not reachable");
+        }
+#ifdef SQUARED_CONSOLE
+        dpi = screen_dpi(native->config);
+        console_cell_pixels = console_cell(dpi);
+#ifdef SQUARED_DEV_LOG
+        sq::dev::set_log_listener(console_listener, &console);
+#else
+        console_sink = &console;
+#endif
+        console.print("console: the log, as it is written. Three fingers or ` open and close it;");
+        console.print("tap it to type, drag it to scroll, hold the input row to paste");
+        // Crash reports: the last run's is shown now; this run's is kept for
+        // the next, in the app's private files.
+        if (const char* private_files = native->activity->internalDataPath;
+            private_files != nullptr) {
+            std::snprintf(crash_path.data(), crash_path.size(), "%s/crash.txt", private_files);
+            std::snprintf(crash_previous_path.data(), crash_previous_path.size(),
+                          "%s/crash-previous.txt", private_files);
+            static_cast<void>(sq::console::show_crash_file(console, crash_path.data(),
+                                                           crash_previous_path.data()));
+            if (!sq::console::install_crash_file(crash_path.data(), &console)) {
+                SQ_LOGW("console: crash reports will not be kept");
+            }
+            // The end of every run is kept for the next, not only a crash's:
+            // saved when the app stops (leaves the screen) and when it ends.
+            // The app's data directory, where `ls` and `pull` start: files/'s parent.
+            std::snprintf(data_path.data(), data_path.size(), "%s", private_files);
+            if (char* slash = std::strrchr(data_path.data(), '/'); slash != nullptr) *slash = '\0';
+            std::snprintf(push_path.data(), push_path.size(), "%s", private_files);
+            std::snprintf(log_path.data(), log_path.size(), "%s/log.txt", private_files);
+            std::snprintf(log_previous_path.data(), log_previous_path.size(), "%s/log-previous.txt",
+                          private_files);
+            if (sq::console::keep_previous_log(log_path.data(), log_previous_path.data())) {
+                console.print("console: `log previous` shows how the last run ended");
+            }
+        }
+        add_console_commands();
+        console.show();
+        // `make console-only`: the Console runs, the App waits for `app start`,
+        // so an App that crashes at start can still be reached.
+        if (intent_flag(jni(), activity, "squared.console_only")) {
+            app_stopped = true;
+            SQ_LOGI("console only: your App is not started; app start starts it");
+        }
+#ifdef SQUARED_BRIDGE_PORT
+        looper = native->looper;
+        open_bridge();
+#endif
+#endif
+    }
+
+    Platform(const Platform&) = delete;
+    Platform& operator=(const Platform&) = delete;
+#ifdef SQUARED_CONSOLE
+    ~Platform() {
+#ifdef SQUARED_BRIDGE_PORT
+        console.set_mirror(nullptr, nullptr);
+        bridge.close();
+#endif
+        save_console_log();
+        sq::console::remove_crash_file();
+#ifdef SQUARED_DEV_LOG
+        sq::dev::set_log_listener(nullptr, nullptr);
+#else
+        console_sink = nullptr;
+#endif
+    }
+#endif
+
+    sq::graphics::Context graphics;
+    sq::files::AndroidAssetFileSystem files;
+    sq::assets::AssetManager assets;
+    sq::app::Runtime runtime;
+    /// The process's App (process_app()), which outlives this Platform.
+    sq::App& app = process_app();
+
+    /// The keyboard, key characters and the clipboard, through JNI; and the
+    /// text-input service the application's text fields use.
+    sq_android::AndroidText text;
+    sq_android::TextInput text_input{text};
+
+#ifdef SQUARED_CONSOLE
+    /// The Console and what draws it, inside this object's one allocation
+    /// (about 88 KB at the defaults). After graphics, so the renderer's GL
+    /// objects are deleted before the context is.
+    sq::console::Console console;
+    sq::console::Renderer console_renderer;
+    int dpi{160};
+    int console_cell_pixels{8};
+    /// Where a crash writes its report, and where the last one is kept once shown.
+    std::array<char, 512> crash_path{};
+    std::array<char, 512> crash_previous_path{};
+    /// Where the end of this run's log is saved, and where the last run's is kept.
+    std::array<char, 512> log_path{};
+    std::array<char, 512> log_previous_path{};
+    /// Where `ls` and `pull` start (the app's data directory), and where a push lands (files/).
+    std::array<char, 512> data_path{};
+    std::array<char, 512> push_path{};
+#ifdef SQUARED_BRIDGE_PORT
+    /// The Console from Termux: `make console` (about 17 KB, no allocation).
+    sq::console::Bridge bridge;
+    ALooper* looper{nullptr};
+#endif
+    /// Wrapped rows the view is moved back from the newest, by dragging.
+    int console_scroll{0};
+    /// Typing goes to the Console: it was opened, or tapped, and not closed since.
+    bool console_focused{false};
+    /// Frames until the keyboard is asked for again after Enter, which some
+    /// keyboards take as "done" and hide themselves on; 0 when not waiting.
+    int keyboard_reshow_frames{0};
+
+    /// A gesture that started on the Console: all of it is the Console's.
+    struct ConsoleTouch {
+        std::int64_t pointer{-1};  ///< The finger, or -1 when none.
+        float x{0};
+        float y{0};
+        int scroll{0};             ///< console_scroll when it went down.
+        bool moved{false};         ///< Past the slop: a drag, not a tap.
+    } console_touch;
+
+    /// A three-finger tap, from the third finger down until every finger is up.
+    struct ThreeFingers {
+        bool active{false};
+        bool tap{true};            ///< Still a tap: no fourth finger, nothing moved far.
+        std::array<std::int64_t, 3> ids{};
+        std::array<float, 3> x{};
+        std::array<float, 3> y{};
+    } three;
+
+    /// Where `copy` writes: the clipboard, through `text`.
+    sq::console::ClipboardWriter clipboard_writer{
+        .context = &text,
+        .begin = [](void* c) noexcept { return static_cast<sq_android::AndroidText*>(c)->clip_begin(); },
+        .append = [](void* c, std::string_view piece) noexcept {
+            static_cast<sq_android::AndroidText*>(c)->clip_append(piece);
+        },
+        .end = [](void* c) noexcept { return static_cast<sq_android::AndroidText*>(c)->clip_end(); }};
+
+    /// How far a finger may move and still tap: 2 cells, about 3 mm.
+    [[nodiscard]] float slop() const { return static_cast<float>(2 * console_cell_pixels); }
+
+    void open_console() {
+        console.show();
+        console_scroll = 0;
+        focus_console();
+    }
+    void focus_console() {
+        console_focused = true;
+        text.show_keyboard();
+    }
+    void close_console() {
+        console.hide();
+        console_focused = false;
+        console_touch.pointer = -1;
+        if (!text_input.active()) text.hide_keyboard();
+        SQ_LOGI("console: closed");
+    }
+    void toggle_console() {
+        if (console.shown()) {
+            close_console();
+        } else {
+            open_console();
+        }
+    }
+
+    /// The clipboard's text into the input line, newlines as spaces.
+    void paste_into_console() {
+        std::array<char, sq::console::input_bytes> pasted{};
+        const std::size_t length = text.clip_text(pasted);
+        for (std::size_t i = 0; i < length; ++i) {
+            if (pasted[i] == '\n' || pasted[i] == '\r' || pasted[i] == '\t') pasted[i] = ' ';
+        }
+        console.text({pasted.data(), length});
+    }
+
+    /// A key while the Console has the keyboard, or backtick at any time.
+    /// True when it was the Console's; then nothing of it reaches the
+    /// application. Volume and other system keys are never taken.
+    bool console_key(std::int32_t code, std::int32_t action, std::int32_t meta,
+                     std::int32_t device, bool repeat) {
+        const bool down = action == AKEY_EVENT_ACTION_DOWN;
+        const bool plain = (meta & (AMETA_CTRL_ON | AMETA_ALT_ON | AMETA_META_ON)) == 0;
+        if (code == AKEYCODE_GRAVE && plain) {
+            if (down && !repeat) toggle_console();
+            return true;
+        }
+        if (!console_focused || !console.shown()) return false;
+        switch (code) {
+            case AKEYCODE_VOLUME_UP:
+            case AKEYCODE_VOLUME_DOWN:
+            case AKEYCODE_VOLUME_MUTE:
+            case AKEYCODE_POWER:
+                return false;
+            case AKEYCODE_BACK:
+                if (!down) close_console();
+                return true;
+            default:
+                break;
+        }
+        if (!down) return true;
+        if (code == AKEYCODE_V && (meta & AMETA_CTRL_ON) != 0) {
+            paste_into_console();
+            return true;
+        }
+        if (translate_key(code) == Key::enter) keyboard_reshow_frames = 6;  // about 100 ms
+        if (!console.key(translate_key(code), translate_modifiers(meta))) {
+            const char32_t typed = text.character(device, code, meta);
+            if (typed >= 0x20 && typed != 0x7F) {
+                std::array<char, 4> utf8{};
+                console.text({utf8.data(), sq_android::encode_utf8(typed, utf8)});
+            }
+        }
+        console_scroll = 0;
+        if (!console.shown()) close_console();  // the `close` command ran
+        return true;
+    }
+
+    /// A touch, before the application sees it: the three-finger tap, and any
+    /// gesture that starts on the Console. True when it was the Console's.
+    bool console_motion(AInputEvent* input, std::int32_t action, std::size_t index) {
+        const std::size_t count = AMotionEvent_getPointerCount(input);
+        if (three.active) {
+            if (action == AMOTION_EVENT_ACTION_POINTER_DOWN) three.tap = false;
+            if (action == AMOTION_EVENT_ACTION_MOVE) {
+                for (std::size_t i = 0; i < count; ++i) {
+                    const std::int64_t id = AMotionEvent_getPointerId(input, i);
+                    for (std::size_t f = 0; f < three.ids.size(); ++f) {
+                        if (three.ids[f] == id &&
+                            (std::abs(AMotionEvent_getX(input, i) - three.x[f]) > slop() ||
+                             std::abs(AMotionEvent_getY(input, i) - three.y[f]) > slop())) {
+                            three.tap = false;
+                        }
+                    }
+                }
+            }
+            if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL) {
+                constexpr std::int64_t tap_nanoseconds = 500'000'000;
+                if (three.tap && action == AMOTION_EVENT_ACTION_UP &&
+                    AMotionEvent_getEventTime(input) - AMotionEvent_getDownTime(input) <
+                        tap_nanoseconds) {
+                    toggle_console();
+                }
+                three.active = false;
+            }
+            return true;
+        }
+        if (action == AMOTION_EVENT_ACTION_POINTER_DOWN && count == 3) {
+            // The gesture becomes the Console's. The two fingers already down
+            // are released far off screen, so the application ends their
+            // presses without a click; nothing more of it reaches the app.
+            three = {.active = true, .tap = true};
+            for (std::size_t i = 0; i < count; ++i) {
+                const std::int64_t id = AMotionEvent_getPointerId(input, i);
+                three.ids[i] = id;
+                three.x[i] = AMotionEvent_getX(input, i);
+                three.y[i] = AMotionEvent_getY(input, i);
+                if (i == index) continue;
+                if (id == console_touch.pointer) {
+                    console_touch.pointer = -1;
+                    continue;
+                }
+                Event released;
+                released.type = Event::Type::PointerUp;
+                released.pointer_id = id;
+                released.x = -1.0e6F;
+                released.y = -1.0e6F;
+                send(released);
+            }
+            return true;
+        }
+
+        const float x = AMotionEvent_getX(input, index);
+        const float y = AMotionEvent_getY(input, index);
+        const std::int64_t id = AMotionEvent_getPointerId(input, index);
+        const sq::console::Frame frame = console_frame();
+        if (action == AMOTION_EVENT_ACTION_DOWN && console.shown() &&
+            x >= static_cast<float>(frame.x) && x < static_cast<float>(frame.x + frame.width) &&
+            y >= static_cast<float>(frame.y) && y < static_cast<float>(frame.y + frame.height)) {
+            console_touch = {.pointer = id, .x = x, .y = y, .scroll = console_scroll};
+            return true;
+        }
+        if (console_touch.pointer < 0) return false;
+
+        if (action == AMOTION_EVENT_ACTION_MOVE) {
+            for (std::size_t i = 0; i < count; ++i) {
+                if (AMotionEvent_getPointerId(input, i) != console_touch.pointer) continue;
+                const float dx = AMotionEvent_getX(input, i) - console_touch.x;
+                const float dy = AMotionEvent_getY(input, i) - console_touch.y;
+                if (std::abs(dx) > slop() || std::abs(dy) > slop()) console_touch.moved = true;
+                if (console_touch.moved) {
+                    // Drag down to see older lines.
+                    const int rows = static_cast<int>(dy) / std::max(1, frame.cell);
+                    console_scroll = std::clamp(console_touch.scroll + rows, 0,
+                                                sq::console::scroll_limit(console, frame));
+                }
+            }
+            // The other fingers' moves still go to the application.
+            for (std::size_t i = 0; i < count; ++i) {
+                if (AMotionEvent_getPointerId(input, i) == console_touch.pointer) continue;
+                Event moved;
+                moved.type = Event::Type::PointerMove;
+                moved.x = AMotionEvent_getX(input, i);
+                moved.y = AMotionEvent_getY(input, i);
+                moved.pointer_id = AMotionEvent_getPointerId(input, i);
+                moved.input_device_id = AInputEvent_getDeviceId(input);
+                send(moved);
+            }
+            return true;
+        }
+        const bool lifted = action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL ||
+                            (action == AMOTION_EVENT_ACTION_POINTER_UP && id == console_touch.pointer);
+        if (!lifted) return false;  // another finger, the application's
+        if (!console_touch.moved && action != AMOTION_EVENT_ACTION_CANCEL) {
+            const int sx = static_cast<int>(console_touch.x);
+            const int sy = static_cast<int>(console_touch.y);
+            const sq::console::GridSize cells = sq::console::grid(frame);
+            const bool on_input_row = cells.rows > 0 && sy >= frame.y + (cells.rows - 1) * frame.cell;
+            constexpr std::int64_t hold_nanoseconds = 500'000'000;
+            const bool held = AMotionEvent_getEventTime(input) - AMotionEvent_getDownTime(input) >=
+                              hold_nanoseconds;
+            if (sq::console::touches_close(frame, sx, sy)) {
+                close_console();
+            } else if (on_input_row && held) {
+                focus_console();
+                paste_into_console();
+            } else {
+                focus_console();
+            }
+        }
+        console_touch.pointer = -1;
+        return true;
+    }
+
+    /// The built-in commands: the system's, `gl`, `display`, and `alloc`
+    /// with the dev log; and their `dump` groups. A table too small for them
+    /// says so once.
+    void add_console_commands() {
+        using Added = sq::console::Commands::AddResult;
+        std::size_t refused = sq::console::add_system_commands(console);
+        refused += sq::console::add_gl_command(console) != Added::added ? 1 : 0;
+        refused += sq::console::add_copy_command(console, clipboard_writer) != Added::added ? 1 : 0;
+        refused += crash_previous_path[0] != '\0' &&
+                           sq::console::add_crash_command(console, crash_previous_path.data()) !=
+                               Added::added
+                       ? 1
+                       : 0;
+        if (data_path[0] != '\0') {
+#ifdef SQUARED_BRIDGE_PORT
+            refused += sq::console::add_file_commands(console, data_path.data(), &bridge);
+#else
+            refused += sq::console::add_file_commands(console, data_path.data(), nullptr);
+#endif
+        }
+        refused += console.add("logcat", "logcat [lines]: the app's own system log, the newest 200",
+                               logcat_command) != Added::added
+                       ? 1
+                       : 0;
+        refused +=
+            log_previous_path[0] != '\0' &&
+                    sq::console::add_log_command(console, log_previous_path.data()) != Added::added
+                ? 1
+                : 0;
+        refused += console.add("app", "app [stop | start | restart]: the application, in this process",
+                               app_command, this) != Added::added ? 1 : 0;
+        refused += console.add("screens",
+                               "screens [low-memory]: the screen stack, its panes and what each "
+                               "keeps; low-memory: what the system sends when memory is short",
+                               screens_command, this) != Added::added ? 1 : 0;
+        refused += console.add("quit", "quit: close the application and the console",
+                               [](sq::console::Console&, const sq::console::Args&, void* self) {
+                                   static_cast<Platform*>(self)->quit_asked = true;
+                               },
+                               this) != Added::added ? 1 : 0;
+        refused += console.add("display",
+                               "display: pixels, density, the console's cells and the safe area",
+                               display_command, this) != Added::added ? 1 : 0;
+#ifdef SQUARED_DEV_LOG
+        refused += console.add("alloc", "alloc: heap allocations made in frames, and where",
+                               [](sq::console::Console&, const sq::console::Args&, void*) {
+                                   sq::dev::report_allocations();
+                               }) != Added::added ? 1 : 0;
+#endif
+        if (refused != 0) {
+            SQ_LOGW("console: %zu built-in commands did not fit; raise CONSOLE_COMMANDS", refused);
+        }
+
+        // `dump` groups for the template's own commands; `sys` and `memory`
+        // came with the system's. `dump crash` reads how the last run ended.
+        using Grouped = sq::console::Groups::AddResult;
+        std::size_t ungrouped = console.add_group("sys", {"gl", "display"}) != Grouped::added ? 1 : 0;
+        if (crash_previous_path[0] != '\0') {
+            ungrouped += console.add_to_group("crash", "crash") != Grouped::added ? 1 : 0;
+        }
+        if (log_previous_path[0] != '\0') {
+            ungrouped += console.add_to_group("crash", "log previous") != Grouped::added ? 1 : 0;
+        }
+        ungrouped += console.add_to_group("crash", "logcat 100") != Grouped::added ? 1 : 0;
+        ungrouped += console.add_to_group("app", "screens") != Grouped::added ? 1 : 0;
+#ifdef SQUARED_DEV_LOG
+        ungrouped += console.add_to_group("memory", "alloc") != Grouped::added ? 1 : 0;
+#endif
+        if (ungrouped != 0) {
+            SQ_LOGW("console: %zu dump group lines did not fit; raise CONSOLE_GROUP_LINES", ungrouped);
+        }
+    }
+
+    /// Stop the application: its surface and its dispose(), then a fresh,
+    /// uncreated object in its place, so a later start is a first start. The
+    /// process, the window, the graphics context and the Console stay.
+    void stop_app() {
+        if (!created) {
+            app_stopped = true;
+            return;
+        }
+        if (surface_ready) app.surface_destroyed();
+        app.dispose();
+        if (text_input.active()) text_input.stop();
+        std::destroy_at(&app);
+        std::construct_at(&app);
+        created = false;
+        app_stopped = true;
+        SQ_LOGI("app: stopped");
+        if (console_focused) text.show_keyboard();
+    }
+
+    /// Start it again: create(), the surface, the size. Waits for a window if
+    /// there is none.
+    void start_stopped_app() {
+        if (created) {
+            SQ_LOGI("app: already running");
+            return;
+        }
+        app_stopped = false;
+        if (!surface_ready) {
+            SQ_LOGI("app: starts when the window returns");
+            return;
+        }
+        // A create() that failed may have left the object half made.
+        std::destroy_at(&app);
+        std::construct_at(&app);
+        if (!start_app()) {
+            app_stopped = true;
+            return;
+        }
+        app.surface_created(graphics);
+        sync_size(true);
+        SQ_LOGI("app: started");
+    }
+
+    static void app_command(sq::console::Console& out, const sq::console::Args& args,
+                            void* context) noexcept {
+        auto& self = *static_cast<Platform*>(context);
+        const std::string_view verb = args.text(1);
+        if (verb == "stop") {
+            self.stop_app();
+        } else if (verb == "start") {
+            self.start_stopped_app();
+        } else if (verb == "restart") {
+            self.stop_app();
+            self.start_stopped_app();
+        } else if (verb.empty()) {
+            out.printf(sq::console::Level::info, "app: %s", self.created ? "running" : "stopped");
+        } else {
+            out.print("app: app, app stop, app start or app restart", sq::console::Level::error);
+        }
+    }
+
+    /// `screens`: the App's stack, a line a screen from the root, the panes
+    /// over the top, and what each keeps (scrolls, an unfinished edit), as
+    /// the background would write it. `screens low-memory`: Android's
+    /// low-memory event, through the App, as the system sends it.
+    static void screens_command(sq::console::Console& out, const sq::console::Args& args,
+                                void* context) noexcept {
+        auto& self = *static_cast<Platform*>(context);
+        if (!self.created) {
+            out.print("screens: the app is not running (app start)", sq::console::Level::error);
+            return;
+        }
+        const std::string_view verb = args.text(1);
+        if (verb == "low-memory") {
+            self.app.low_memory();
+            out.print("screens: low memory sent: the Stage let go of what it keeps warm, the "
+                      "model hears of it at its next turn");
+        } else if (!verb.empty()) {
+            out.print("screens: screens, or screens low-memory", sq::console::Level::error);
+            return;
+        }
+        const auto line = [](void* console, std::string_view text) noexcept {
+            static_cast<sq::console::Console*>(console)->print(text);
+        };
+        self.app.stage.describe({.write = line, .context = &out});
+    }
+
+    /// `logcat [lines]`: Android's log as this app may read it, which is its
+    /// own lines only (a library that failed to load, a Java exception, the
+    /// crash summary among them). `logcat -d` dumps and exits.
+    static void logcat_command(sq::console::Console& out, const sq::console::Args& args,
+                               void*) noexcept {
+        const long long wanted = args.size() > 1 ? args.integer(1, 200) : 200;
+        const long long lines = std::clamp<long long>(wanted, 1, 2000);
+        std::array<char, 8> count{};
+        std::snprintf(count.data(), count.size(), "%lld", lines);
+        const char* const argv[] = {
+            "/system/bin/logcat", "-d", "-t", count.data(), "-v", "brief", nullptr};
+        if (!sq::console::run_program(out, argv, static_cast<std::size_t>(lines) + 8)) {
+            out.print("logcat: /system/bin/logcat could not be run", sq::console::Level::error);
+        }
+    }
+
+    /// The newest 200 lines, for the next run's `log previous`. One small
+    /// file write; when the app leaves the screen, and when it ends.
+    void save_console_log() {
+        if (log_path[0] == '\0') return;
+        if (!sq::console::save_log(console, log_path.data(), 200)) {
+            __android_log_print(ANDROID_LOG_WARN, kTag, "console: could not save the log");
+        }
+    }
+
+#ifdef SQUARED_BRIDGE_PORT
+    /// Listen for Termux's sqconsole on this project's port (mk/pkg_squared_core.mk
+    /// makes the port and the secret; build/dev/bridge.conf holds them), and
+    /// mirror every Console line to it. Its sockets are watched by this
+    /// thread's looper, so it costs nothing while nobody talks to it.
+    void open_bridge() {
+        std::array<char, 33> secret{};
+        std::snprintf(secret.data(), secret.size(), "%016llx%016llx",
+                      static_cast<unsigned long long>(SQUARED_BRIDGE_SECRET_HIGH),
+                      static_cast<unsigned long long>(SQUARED_BRIDGE_SECRET_LOW));
+        const sq::console::BridgeStatus status = bridge.open({.port = SQUARED_BRIDGE_PORT,
+                                                              .secret = {secret.data(), 32},
+                                                              .push_directory = push_path.data()},
+                                                             {.watch = bridge_watch,
+                                                              .command = bridge_command,
+                                                              .connected = bridge_connected,
+                                                              .note = bridge_note,
+                                                              .context = this});
+        std::fill(secret.begin(), secret.end(), '\0');
+        if (status == sq::console::BridgeStatus::listening) {
+            console.set_mirror(
+                [](void* b, sq::console::Level level, std::string_view line) noexcept {
+                    static_cast<sq::console::Bridge*>(b)->send(level, line);
+                },
+                &bridge);
+            SQ_LOGI("bridge: listening on 127.0.0.1:%d; make console in Termux reaches it",
+                    static_cast<int>(bridge.port()));
+        } else {
+            SQ_LOGW("bridge: not open (%s)",
+                    status == sq::console::BridgeStatus::refused
+                        ? "the port is taken, or the INTERNET permission is missing"
+                        : "the build's secret is malformed");
+        }
+    }
+
+    /// Android's looper calls this when a bridge socket is ready.
+    static int bridge_ready(int fd, int events, void* data) {
+        auto& self = *static_cast<Platform*>(data);
+        static_cast<void>(self.bridge.ready(
+            fd, (events & (ALOOPER_EVENT_INPUT | ALOOPER_EVENT_HANGUP | ALOOPER_EVENT_ERROR)) != 0,
+            (events & ALOOPER_EVENT_OUTPUT) != 0));
+        return 1;  // the bridge stops watching a socket itself, through bridge_watch
+    }
+    static void bridge_watch(void* context, int fd, bool read, bool write) noexcept {
+        auto& self = *static_cast<Platform*>(context);
+        if (self.looper == nullptr) return;
+        if (!read && !write) {
+            ALooper_removeFd(self.looper, fd);
+            return;
+        }
+        ALooper_addFd(self.looper, fd, ALOOPER_POLL_CALLBACK,
+                      (read ? ALOOPER_EVENT_INPUT : 0) | (write ? ALOOPER_EVENT_OUTPUT : 0),
+                      bridge_ready, &self);
+    }
+    static void bridge_note(void* context, sq::console::Level level,
+                            std::string_view line) noexcept {
+        static_cast<Platform*>(context)->console.print(line, level);
+    }
+    static void bridge_command(void* context, std::string_view line) noexcept {
+        auto& self = *static_cast<Platform*>(context);
+        self.console.run(line);
+        // A `dump` goes on after its command returns: its end mark waits
+        // until the dump is done, so `make console CMD='dump sys'` prints
+        // every line before it exits.
+        self.bridge.set_busy(self.console.dumping());
+    }
+    static void bridge_connected(void* context, bool replay) noexcept {
+        auto& self = *static_cast<Platform*>(context);
+        // A scripted client (make console CMD=...) asks for no replay, and
+        // gets only its command's lines: no note of its coming either.
+        if (!replay) return;
+        const sq::console::Scrollback& lines = self.console.lines();
+        for (auto at = lines.last(200); at != lines.end(); ++at) {
+            self.bridge.send((*at).level, (*at).text);
+        }
+        SQ_LOGI("bridge: Termux connected");
+    }
+#endif
+
+    static void display_command(sq::console::Console& out, const sq::console::Args&,
+                                void* context) noexcept {
+        const auto& self = *static_cast<const Platform*>(context);
+        const sq::console::GridSize cells = sq::console::grid(self.console_frame());
+        out.printf(sq::console::Level::info,
+                   "display: %dx%d px, %d dpi; console cell %d px, %d by %d; safe area (px): "
+                   "left %d top %d right %d bottom %d",
+                   self.reported_width, self.reported_height, self.dpi, self.console_cell_pixels,
+                   cells.columns, cells.rows, self.reported_area.left, self.reported_area.top,
+                   self.reported_area.right, self.reported_area.bottom);
+    }
+#endif
+
+    /// The Java side, for the safe-area query. Both are owned by Android and
+    /// outlive the platform object.
+    JavaVM* vm;
+    jobject activity;
+    /// The activity, for its UI thread (post_ui_job).
+    const ANativeActivity* native_activity;
+
+    /// What Android kept for this activity (malloc'd by the glue): until the
+    /// App's first create().
+    struct Free {
+        void operator()(void* bytes) const noexcept { std::free(bytes); }
+    };
+    std::unique_ptr<void, Free> saved_state;
+    std::size_t saved_state_size{0};
+
+    /// The bars as last asked of the UI thread; asked again on each focus.
+    bool bars_hidden{false};
+    bool bars_asked{false};
+    /// The keyboard was up at the last frame: measured while it is.
+    bool keyboard_up{false};
+
+    /// The device's API level, read once from the configuration NativeActivity
+    /// already holds. What the device lacks is decided from this, by comparing
+    /// numbers, not by calling and catching the failure.
+    int api_level;
+    JNIEnv* env{nullptr};
+    bool env_attached{false};
+    sq::app::SafeArea reported_area{};
+    int frames_since_measure{0};
+    int fast_measure_frames{0};
+
+    bool has_focus{false};
+    bool surface_ready{false};
+
+    /// Set once the application has asked to quit and ANativeActivity_finish
+    /// has been called. From then on nothing is drawn, and the loop only waits
+    /// for Android to tear the activity down.
+    bool finishing{false};
+    Clock::time_point last_frame{Clock::now()};
+
+    /// The drawable size the application was last told about.
+    int reported_width{0};
+    int reported_height{0};
+
+    /// The application has been created and not stopped since: only then is
+    /// any of its methods but create() called.
+    bool created{false};
+    /// The Console stopped it (`app stop`), or its create() failed in a
+    /// Console build: a new window does not start it again; `app start` does.
+    bool app_stopped{false};
+    /// The Console's `quit`: finish the activity, as the application's own
+    /// quit_requested() does.
+    bool quit_asked{false};
+
+    void send(const Event& event) {
+        if (created) app.handle_event(event);
+    }
+
+    /// Create the application and hand it the text-input service. False, and
+    /// logged, if its create() failed.
+    bool start_app() {
+        app.set_report({.write = report_line, .context = this});
+        // Once: an `app start` later in this activity is a new launch.
+        app.set_saved_state({static_cast<const std::byte*>(saved_state.get()), saved_state_size});
+        const bool made = app.create(runtime);
+        app.set_saved_state({});
+        saved_state.reset();
+        saved_state_size = 0;
+        if (!made) {
+            SQ_LOGW("app: create() failed");
+            return false;
+        }
+        created = true;
+        last_frame = Clock::now();
+        app.set_text_input_service(&text_input);
+        return true;
+    }
+
+    /// The JNI environment for this thread. Attached once on first use and
+    /// kept: attaching and detaching around every query would allocate a Java
+    /// thread object each time.
+    JNIEnv* jni() {
+        if (env != nullptr || vm == nullptr) return env;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+            return env;
+        }
+        if (vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+            env_attached = true;
+        } else {
+            env = nullptr;
+        }
+        return env;
+    }
+
+    /// Release the attachment taken by jni(). Must run on the same thread,
+    /// before android_main returns.
+    void release_jni() {
+        if (env_attached && vm != nullptr) vm->DetachCurrentThread();
+        env = nullptr;
+        env_attached = false;
+    }
+
+    /// Measure the bars and tell the application if they changed.
+    ///
+    /// The numbers are not available at the first frame - the window has not
+    /// been laid out yet - and change on rotation, when the bars are hidden or
+    /// shown, and with the keyboard, so this runs on the frames after each of
+    /// those (fast_measure_frames) and, while the keyboard is up, every 30
+    /// frames (the user can close it without telling us). Never otherwise.
+    /// An unchanged answer costs the JNI calls and nothing else.
+    void sync_safe_area() {
+        frames_since_measure = 0;
+        const sq::app::SafeArea measured = api_level >= kInsetsApi
+            ? measure_safe_area(jni(), activity, api_level)
+            : measure_visible_frame(jni(), activity);
+        if (measured == reported_area) return;
+        reported_area = measured;
+        SQ_LOGI("safe area (px): left %d top %d right %d bottom %d",
+                static_cast<int>(measured.left), static_cast<int>(measured.top),
+                static_cast<int>(measured.right), static_cast<int>(measured.bottom));
+        if (created) notify_safe_area(app, measured);
+    }
+
+    /// Re-measure the surface, and tell the application if its size changed.
+    ///
+    /// Called on every frame, not only when Android says the window changed.
+    /// On rotation Android sends WINDOW_RESIZED and CONFIG_CHANGED before the
+    /// surface has its new size - EGL still reports the old one until a
+    /// buffer has been swapped at the new size. Measuring only on those
+    /// commands caught the stale size and kept it: the viewport stayed at the
+    /// previous orientation and the picture landed in part of the screen.
+    ///
+    /// Cost per frame: two eglQuerySurface calls and a glViewport. Nothing is
+    /// allocated, and the application hears about a size only when it changes.
+    void sync_size(bool always) {
+        graphics.refresh_viewport();
+        const int width = graphics.pixel_width();
+        const int height = graphics.pixel_height();
+        if (!always && width == reported_width && height == reported_height) {
+            return;
+        }
+        reported_width = width;
+        reported_height = height;
+        if (created) app.resize(width, height);
+
+        Event resized;
+        resized.type = Event::Type::Resize;
+        resized.width = width;
+        resized.height = height;
+        send(resized);
+
+        // The bars are different in the other orientation, and Android reports
+        // the new ones a few frames after the new size. Ask again on each of
+        // the next frames rather than waiting out the slow poll, which left
+        // the interface laid out for the old orientation for half a second.
+        fast_measure_frames = 12;
+        sync_safe_area();
+    }
+
+    /// Bring the rendering surface up. Called when Android hands us a window,
+    /// which happens more than once in a process — on rotation, and after the
+    /// app returns from the background. The window is a different one each
+    /// time, which is why set_native_window() exists.
+    void attach(ANativeWindow* window) {
+        graphics.set_native_window(window);
+
+        const bool ready = created
+            ? graphics.resume()
+            : graphics.create(sq::graphics::ContextConfig{
+                  .native_window = window,
+                  .title = kTag,
+                  .logical_width = ANativeWindow_getWidth(window),
+                  .logical_height = ANativeWindow_getHeight(window)});
+
+        if (!ready) {
+            SQ_LOGW("graphics: surface not available");
+            surface_ready = false;
+            return;
+        }
+
+        surface_ready = true;
+        SQ_LOGI("graphics: %dx%d, generation %llu, resources %s",
+                graphics.pixel_width(), graphics.pixel_height(),
+                static_cast<unsigned long long>(graphics.generation()),
+                graphics.resources_preserved() ? "preserved" : "lost");
+        if (!created) log_driver();
+#ifdef SQUARED_CONSOLE
+        // Before the application: the Console is for when that goes wrong.
+        if (!graphics.resources_preserved()) console_renderer.invalidate();
+        if (!console_renderer.valid() && !console_renderer.create()) {
+            SQ_LOGW("console: renderer not available");
+        }
+#endif
+
+        if (!created && !app_stopped && !start_app()) {
+#ifdef SQUARED_CONSOLE
+            // The Console stays up to say so; `app start` tries again.
+            app_stopped = true;
+            console.show();
+#else
+            surface_ready = false;
+            return;
+#endif
+        }
+
+        if (created) app.surface_created(graphics);
+
+        // Always, even at an unchanged size: a new surface is a new
+        // application state, and the application re-lays out from here.
+        sync_size(true);
+    }
+
+#ifdef SQUARED_CONSOLE
+    /// Where the Console is drawn: the upper half of the screen, inside the
+    /// safe area.
+    sq::console::Frame console_frame() const {
+        const int left = reported_area.left;
+        const int top = reported_area.top;
+        return {.x = left,
+                .y = top,
+                .width = reported_width - left - reported_area.right,
+                .height = (reported_height - top - reported_area.bottom) / 2,
+                .cell = console_cell_pixels,
+                .scroll = console_scroll};
+    }
+#endif
+
+    /// Hide or show the system bars as the application wants: asked of the UI
+    /// thread when that changes, and again after each focus (a dialog or the
+    /// keyboard may have brought them back). Then measured for a while: the
+    /// bars slide.
+    void sync_bars() {
+        if (!created) return;
+        const bool hide = app.hides_bars();
+        if (bars_asked && hide == bars_hidden) return;
+        bars_asked = true;
+        bars_hidden = hide;
+        if (post_ui_job(native_activity, hide ? UiJob::hide_bars : UiJob::show_bars)) {
+            fast_measure_frames = std::max(fast_measure_frames, 24);
+        }
+    }
+
+    /// The application asked to go to the background (back at its root):
+    /// the task moves back, as Home does. Through the UI thread; from here
+    /// when there is none (the manifest without squared_on_create).
+    void to_background() {
+        if (!post_ui_job(native_activity, UiJob::to_back)) move_task_to_back(jni(), activity);
+    }
+
+    /// Android asks what to keep with the activity: the App's bytes, copied
+    /// with malloc into the glue's savedState, which hands them to Android
+    /// and frees them. 8 KB on this thread's stack, for the asking.
+    void save_state(android_app* native) {
+        if (!created) return;
+        std::array<std::byte, sq::app::Application::saved_state_bytes> out{};
+        const std::size_t length = app.save_state(out);
+        if (length == 0) return;
+        void* copy = std::malloc(length);
+        if (copy == nullptr) return;
+        std::memcpy(copy, out.data(), length);
+        native->savedState = copy;
+        native->savedStateSize = length;
+        SQ_LOGI("saved state: %zu bytes, for Android to keep with the activity", length);
+    }
+
+    /// Name the GL driver once, after the first context is current: what a
+    /// report from a device needs, and three calls.
+    ///
+    /// Through dlsym rather than a direct call, so this file does not link GL
+    /// itself: the graphics backend decides that, and under the null backend
+    /// there is no GL to ask and the line is simply not printed.
+    static void log_driver() {
+        using GetString = const unsigned char* (*)(unsigned int);
+        // Already loaded by the backend; NOLOAD finds it and never loads it.
+        // Either name: on some releases one is a link to the other.
+        void* gles = dlopen("libGLESv3.so", RTLD_NOW | RTLD_NOLOAD);
+        if (gles == nullptr) gles = dlopen("libGLESv2.so", RTLD_NOW | RTLD_NOLOAD);
+        if (gles == nullptr) return;
+        const auto get = reinterpret_cast<GetString>(dlsym(gles, "glGetString"));
+        if (get != nullptr) {
+            constexpr unsigned int kVendor = 0x1F00, kRenderer = 0x1F01, kVersion = 0x1F02;
+            const auto text = [&](unsigned int name) {
+                const unsigned char* value = get(name);
+                return value != nullptr ? reinterpret_cast<const char*>(value) : "?";
+            };
+            SQ_LOGI("driver: %s; %s; %s", text(kVersion), text(kRenderer), text(kVendor));
+        }
+        dlclose(gles);
+    }
+
+    /// The window is going away. Suspend rather than destroy: the context and
+    /// its GPU objects often survive, and resume() is what finds out.
+    void detach() {
+        if (surface_ready && created) app.surface_destroyed();
+        graphics.suspend();
+        surface_ready = false;
+    }
+
+    /// One frame. Does nothing without a surface, which is the normal state
+    /// while backgrounded — drawing then is wasted work at best.
+    void frame() {
+        if (!surface_ready) return;
+
+        const Clock::time_point now = Clock::now();
+        auto delta = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now - last_frame);
+        last_frame = now;
+
+        // A frame after a long pause would otherwise hand the simulation a
+        // delta measured in seconds, and anything integrating over it jumps.
+        constexpr auto maximum_delta = std::chrono::milliseconds(100);
+        if (delta > maximum_delta) delta = maximum_delta;
+
+        sync_size(false);
+        sync_bars();
+        // The keyboard shown or hidden: it slides, so measure for a while.
+        bool keyboard = text_input.active();
+#ifdef SQUARED_CONSOLE
+        keyboard = keyboard || (console_focused && console.shown());
+#endif
+        if (keyboard != keyboard_up) {
+            keyboard_up = keyboard;
+            fast_measure_frames = std::max(fast_measure_frames, 24);
+        }
+        constexpr int measure_interval_frames = 30;
+        if (fast_measure_frames > 0) {
+            --fast_measure_frames;
+            sync_safe_area();
+        } else if (keyboard_up && ++frames_since_measure >= measure_interval_frames) {
+            sync_safe_area();
+        }
+#ifdef SQUARED_DEV_LOG
+        // Count the heap allocations update() and render() make. Frames that
+        // allocate are reported over the log sink: the first at once, then a
+        // summary every 120 frames. A frame should allocate nothing.
+        sq::dev::frame_begin();
+#endif
+        if (created) {
+            app.update(delta);
+            app.render(graphics);
+        } else {
+            // Nothing else draws: a plain background under the Console.
+            graphics.clear({0.0F, 0.0F, 0.0F, 1.0F});
+        }
+#ifdef SQUARED_CONSOLE
+        if (keyboard_reshow_frames > 0 && --keyboard_reshow_frames == 0 && console_focused &&
+            console.shown()) {
+            text.show_keyboard();
+        }
+        if (console.shown()) {
+            console_renderer.draw(console, console_frame(), graphics.pixel_width(),
+                                  graphics.pixel_height());
+        }
+#endif
+#ifdef SQUARED_DEV_LOG
+        sq::dev::frame_end();
+#endif
+
+        // present() returns false when the surface has been lost, which is
+        // normal rather than exceptional: it happens every time the app is
+        // backgrounded. The only correct response is to stop drawing and wait
+        // for a new window. Ignoring it spins, rendering into nothing, until
+        // Android kills the process.
+        if (!graphics.present()) {
+            SQ_LOGI("graphics: surface lost during present");
+            if (created) app.surface_destroyed();
+            surface_ready = false;
+        }
+    }
+};
+
+Platform& platform_of(android_app* app) {
+    return *static_cast<Platform*>(app->userData);
+}
+
+void report_line(void* context, std::string_view line) noexcept {
+    SQ_LOGW("%.*s", static_cast<int>(line.size()), line.data());
+#ifdef SQUARED_CONSOLE
+    static_cast<Platform*>(context)->console.show();
+#else
+    static_cast<void>(context);
+#endif
+}
+
+void on_command(android_app* app, int32_t command) {
+    Platform& platform = platform_of(app);
+
+    switch (command) {
+        case APP_CMD_INIT_WINDOW:
+            SQ_LOGI("window created");
+            if (app->window != nullptr) platform.attach(app->window);
+            break;
+
+        case APP_CMD_TERM_WINDOW:
+            SQ_LOGI("window destroyed");
+            platform.detach();
+            break;
+
+        case APP_CMD_WINDOW_RESIZED:
+        case APP_CMD_CONFIG_CHANGED:
+            // Rotation changes the drawable size without destroying the
+            // window, so the surface has to be re-measured even though it is
+            // still valid.
+            // The size may not have changed yet; frame() re-measures every
+            // frame and catches it when it does.
+            if (platform.surface_ready) platform.sync_size(false);
+            break;
+
+        case APP_CMD_GAINED_FOCUS: {
+            platform.has_focus = true;
+            platform.bars_asked = false;  // asked again at the next frame
+            if (platform.created) platform.app.resume();
+            // The clock stopped meaning anything while backgrounded.
+            platform.last_frame = Clock::now();
+            Event event;
+            event.type = Event::Type::Resume;
+            platform.send(event);
+            break;
+        }
+
+        case APP_CMD_LOST_FOCUS: {
+            platform.has_focus = false;
+            if (platform.created) platform.app.pause();
+            Event event;
+            event.type = Event::Type::Pause;
+            platform.send(event);
+            break;
+        }
+
+        case APP_CMD_SAVE_STATE:
+            // What comes back if Android ends the process and brings the app
+            // back; nothing does after a swipe from the recent apps or a quit.
+            platform.save_state(app);
+            break;
+
+        case APP_CMD_DESTROY:
+            SQ_LOGI("destroy");
+            break;
+
+        case APP_CMD_START:
+            // On the screen again: the model hears how long it was away.
+            if (platform.created) platform.app.foreground();
+            break;
+
+        case APP_CMD_STOP:
+            // Off the screen: it may never come back (swiped away, killed for
+            // memory), so the model saves now, and the log is kept for the
+            // next run.
+            if (platform.created) platform.app.background();
+#ifdef SQUARED_CONSOLE
+            platform.save_console_log();
+#endif
+            break;
+
+        case APP_CMD_LOW_MEMORY:
+            SQ_LOGI("low memory");
+            if (platform.created) platform.app.low_memory();
+            break;
+
+        default:
+            break;
+    }
+}
+
+int32_t on_motion(Platform& platform, AInputEvent* input) {
+    const std::int32_t action =
+        AMotionEvent_getAction(input) & AMOTION_EVENT_ACTION_MASK;
+    const std::size_t index = static_cast<std::size_t>(
+        (AMotionEvent_getAction(input) & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)
+        >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
+
+    Event event;
+    event.x = AMotionEvent_getX(input, index);
+    event.y = AMotionEvent_getY(input, index);
+    // The pointer id, not the index: an index is a slot in this event and is
+    // reused as fingers lift, while the id follows one finger from down to up.
+    // Tracking by index is how multi-touch drags end up on the wrong widget.
+    event.pointer_id = AMotionEvent_getPointerId(input, index);
+    event.input_device_id = AInputEvent_getDeviceId(input);
+
+#ifdef SQUARED_CONSOLE
+    // The Console first: the three-finger tap, and gestures that start on it.
+    if (platform.console_motion(input, action, index)) return 1;
+#endif
+
+    switch (action) {
+        case AMOTION_EVENT_ACTION_DOWN:
+        case AMOTION_EVENT_ACTION_POINTER_DOWN:
+            event.type = Event::Type::PointerDown;
+            break;
+        case AMOTION_EVENT_ACTION_MOVE:
+            event.type = Event::Type::PointerMove;
+            break;
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_POINTER_UP:
+        case AMOTION_EVENT_ACTION_CANCEL:
+            event.type = Event::Type::PointerUp;
+            break;
+        default:
+            return 0;
+    }
+
+    // A MOVE carries every active pointer, not just one. Sending only the
+    // first loses the others, and a two-finger gesture then reads as a
+    // one-finger drag.
+    if (event.type == Event::Type::PointerMove) {
+        const std::size_t count = AMotionEvent_getPointerCount(input);
+        for (std::size_t i = 0; i < count; ++i) {
+            Event moved = event;
+            moved.x = AMotionEvent_getX(input, i);
+            moved.y = AMotionEvent_getY(input, i);
+            moved.pointer_id = AMotionEvent_getPointerId(input, i);
+            platform.send(moved);
+        }
+        return 1;
+    }
+
+    platform.send(event);
+    return 1;
+}
+
+int32_t on_key(Platform& platform, AInputEvent* input) {
+    const std::int32_t code = AKeyEvent_getKeyCode(input);
+    const std::int32_t action = AKeyEvent_getAction(input);
+    const std::int32_t meta = AKeyEvent_getMetaState(input);
+    const std::int32_t device = AInputEvent_getDeviceId(input);
+
+#ifdef SQUARED_CONSOLE
+    if (platform.console_key(code, action, meta, device, AKeyEvent_getRepeatCount(input) > 0)) {
+        return 1;
+    }
+#endif
+
+    Event event;
+    event.key = translate_key(code);
+    event.modifiers = translate_modifiers(meta);
+    event.input_device_id = code;   // the raw code, for keys squared does not name
+    event.repeat = AKeyEvent_getRepeatCount(input) > 0;
+
+    if (action == AKEY_EVENT_ACTION_DOWN) {
+        event.type = Event::Type::KeyDown;
+    } else if (action == AKEY_EVENT_ACTION_UP) {
+        event.type = Event::Type::KeyUp;
+    } else {
+        return 0;
+    }
+
+    platform.send(event);
+
+    // What the key types, for a text field that asked for the keyboard. With
+    // Ctrl, Alt or Meta held, a key that types a character (c, with Ctrl)
+    // sends that character, without them, and the modifiers: a text field
+    // leaves it, a terminal makes Ctrl-C of it (Widget::key_text). A key that
+    // types something else with them held (AltGr's @ on a German keyboard)
+    // sends that, as plain text.
+    if (event.type == Event::Type::KeyDown && platform.text_input.active()) {
+        constexpr std::int32_t held = AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON |
+                                      AMETA_ALT_ON | AMETA_ALT_LEFT_ON | AMETA_ALT_RIGHT_ON |
+                                      AMETA_META_ON | AMETA_META_LEFT_ON | AMETA_META_RIGHT_ON;
+        const char32_t typed = platform.text.character(device, code, meta);
+        const char32_t bare = (meta & held) != 0
+                                  ? platform.text.character(device, code, meta & ~held)
+                                  : typed;
+        const auto printable = [](char32_t c) { return c >= 0x20 && c != 0x7F; };
+        Event text;
+        text.type = Event::Type::TextInput;
+        char32_t sent = 0;
+        if ((meta & held) != 0 && (typed == 0 || typed == bare) && printable(bare)) {
+            sent = bare;
+            text.modifiers = event.modifiers;
+        } else if (printable(typed)) {
+            sent = typed;
+            text.modifiers.shift = event.modifiers.shift;
+        }
+        if (sent != 0) {
+            std::array<char, 4> utf8{};
+            text.text.assign(utf8.data(), sq_android::encode_utf8(sent, utf8));
+            platform.send(text);
+        }
+    }
+
+    // Back is a navigation action and also a request to leave. Send both and
+    // let the application decide: a dialog consumes it, a main screen exits.
+    const Navigation navigation = translate_navigation(code);
+    if (navigation != Navigation::unknown
+        && event.type == Event::Type::KeyDown) {
+        Event nav;
+        nav.type = Event::Type::NavigationInput;
+        nav.navigation = navigation;
+        nav.modifiers = event.modifiers;
+        platform.send(nav);
+    }
+
+    if (code == AKEYCODE_BACK && action == AKEY_EVENT_ACTION_UP) {
+        Event back;
+        back.type = Event::Type::BackRequested;
+        platform.send(back);
+    }
+
+    // Returning 1 for BACK stops Android closing the activity behind our back;
+    // the application decides, through quit_requested(), and android_main
+    // then finishes the activity. The volume keys are the system's: 0 lets
+    // Android change the volume, which returning 1 for every key prevented.
+    switch (code) {
+        case AKEYCODE_VOLUME_UP:
+        case AKEYCODE_VOLUME_DOWN:
+        case AKEYCODE_VOLUME_MUTE:
+            return 0;
+        default:
+            return 1;
+    }
+}
+
+int32_t on_input(android_app* app, AInputEvent* input) {
+    Platform& platform = platform_of(app);
+
+    switch (AInputEvent_getType(input)) {
+        case AINPUT_EVENT_TYPE_MOTION: return on_motion(platform, input);
+        case AINPUT_EVENT_TYPE_KEY:    return on_key(platform, input);
+        default:                       return 0;
+    }
+}
+
+}  // namespace
+
+/// The glue's entry point. Named by android_native_app_glue, not by us.
+void android_main(android_app* app) {
+    SQ_LOGI("starting");
+
+    // Heap-allocated because the glue's userData is a void*, and because
+    // Platform holds the graphics context, which must be destroyed before this
+    // function returns.
+    auto platform = std::make_unique<Platform>(app);
+    app->userData = platform.get();
+    char process[128];
+    process_name(process, sizeof(process));
+    SQ_LOGI("device: API %d, process %s", platform->api_level, process);
+    if (platform->saved_state_size != 0) {
+        SQ_LOGI("saved state: %zu bytes: Android brings the activity back",
+                platform->saved_state_size);
+    } else {
+        SQ_LOGI("saved state: none: a new launch");
+    }
+    app->onAppCmd = on_command;
+    app->onInputEvent = on_input;
+
+    // Releases everything the platform owns, once, on the way out. One place
+    // rather than two copies in the loop below, so they cannot drift apart.
+    const auto shut_down = [&] {
+        SQ_LOGI("shutting down");
+        platform->detach();
+        if (platform->created) platform->app.dispose();
+        platform->text.destroy();
+        platform->release_jni();
+        app->userData = nullptr;
+    };
+
+    while (true) {
+        int events = 0;
+        android_poll_source* source = nullptr;
+
+        // Quitting does not happen by returning from android_main. That only
+        // ends this thread: the activity stays on screen, frozen on its last
+        // frame, and the back button appears to have done nothing.
+        //
+        // ANativeActivity_finish asks Android to close the activity. Android
+        // then runs the ordinary teardown - pause, window gone, stop, destroy -
+        // and the glue reports destroyRequested at the end of it. Only then is
+        // it safe to return. Called once; finishing guards it.
+        if (!platform->finishing &&
+            (platform->quit_asked || (platform->created && platform->app.quit_requested()))) {
+            SQ_LOGI("finishing");
+            platform->finishing = true;
+            ANativeActivity_finish(app->activity);
+        }
+        if (!platform->finishing && platform->created && platform->app.take_background_request()) {
+            SQ_LOGI("to the background");
+            platform->to_background();
+        }
+
+        // Block only when there is nothing to draw. With a live surface we
+        // poll with a zero timeout and render continuously; without one - or
+        // once finishing - we wait, so a closing or backgrounded app costs no
+        // battery.
+        int timeout = platform->surface_ready && !platform->finishing ? 0 : -1;
+#ifdef SQUARED_CONSOLE
+        // A `dump` still running with no surface (from Termux, the app in
+        // the background): wake for its next line every 16 ms, then sleep again.
+        if (timeout < 0 && !platform->finishing && platform->console.dumping()) timeout = 16;
+#endif
+
+        // The destroy check sits outside the poll loop as well as inside it.
+        // Inside alone is enough while ALooper_pollOnce blocks on a -1 timeout,
+        // which it does on a device - but if it ever returns immediately with
+        // nothing to report, an inside-only check never runs and the outer
+        // loop spins at full CPU without ever noticing a destroy request.
+        if (app->destroyRequested != 0) {
+            shut_down();
+            return;
+        }
+
+        while (ALooper_pollOnce(timeout, nullptr, &events,
+                                reinterpret_cast<void**>(&source)) >= 0) {
+            if (source != nullptr) source->process(app, source);
+
+            if (app->destroyRequested != 0) {
+                shut_down();
+                return;
+            }
+            if (platform->surface_ready && !platform->finishing) break;
+        }
+
+#ifdef SQUARED_CONSOLE
+        // One line of a `dump` a turn, drawn or not: the bridge sends what it
+        // printed before the next, and no frame waits on a long group.
+        platform->console.update();
+#ifdef SQUARED_BRIDGE_PORT
+        platform->bridge.set_busy(platform->console.dumping());
+#endif
+#endif
+
+        // Nothing is drawn once finishing: the application has said it is
+        // done, and its last frame should be the one it chose.
+        if (!platform->finishing) platform->frame();
+    }
+}
+
+/// The activity's entry, named in the manifest (android.app.func_name), on
+/// Android's UI thread: the way to that thread for the glue's (UiThread,
+/// above), then the glue's own entry, which starts android_main.
+extern "C" JNIEXPORT void squared_on_create(ANativeActivity* activity, void* saved_state,
+                                            size_t saved_state_size) {
+    for (UiThread& thread : ui_threads) {
+        if (thread.activity.load(std::memory_order_acquire) != nullptr) continue;
+        std::array<int, 2> fds{};
+        ALooper* looper = ALooper_forThread();
+        if (looper == nullptr || pipe2(fds.data(), O_NONBLOCK | O_CLOEXEC) != 0) break;
+        thread.read_fd = fds[0];
+        thread.write_fd = fds[1];
+        if (ALooper_addFd(looper, thread.read_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT,
+                          on_ui_jobs, &thread) != 1) {
+            close(fds[0]);
+            close(fds[1]);
+            thread.read_fd = -1;
+            thread.write_fd = -1;
+            break;
+        }
+        thread.activity.store(activity, std::memory_order_release);
+        break;
+    }
+    ANativeActivity_onCreate(activity, saved_state, saved_state_size);
+    glue_on_destroy = activity->callbacks->onDestroy;
+    activity->callbacks->onDestroy = squared_on_destroy;
+}

@@ -1,0 +1,30 @@
+module sq.gui;
+
+import std;
+
+namespace sq::gui
+{
+
+// The helpers below were an anonymous namespace in the
+// original single translation unit; they are shared now.
+using namespace detail;
+
+Panel::Panel( std::string style )
+    : style_( std::move( style ) )
+{}
+
+void Panel::set_style( std::string style )
+{
+    style_ = std::move( style );
+    invalidate_layout();
+}
+
+void Panel::paint( Painter &painter, const Skin &skin, float x, float y ) const
+{
+    const auto &style = skin.panel_style( style_ );
+    if( style.background ) {
+        style.background->draw( painter, bounds_of( *this, x, y ) );
+    }
+}
+
+} // namespace sq::gui
