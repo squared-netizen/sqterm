@@ -21,6 +21,8 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
                -- do term.scroll (lines back)       -->       |   when sh writes)
                <-- snapshot term.screen (the whole screen) -- Terminal + ScreenPublisher
                <-- state term.completed (the shell ended) --
+               -- do term.copy   (two places)       -->       Terminal::copy_text
+               <-- snapshot term.copied (the text, for the clipboard) --
 ```
 
 - **Shell** (the model) watches the pty's descriptor (`Telegraph::watch`):
@@ -38,6 +40,21 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
   `term.completed` is true, Enter calls `quit_app()` (the App kept by
   `squared_main`): the model stops, Android closes the activity, and the
   next launch starts a new shell.
+- **Selecting** (12.4, in TerminalView): a long press (0.45 s, within 10
+  units) selects the word under the finger, and the finger still down moves
+  its end; on blank space it shows the bar with Paste alone. The ends are
+  `sq::term::TextPoint`s, the terminal's line numbers (the snapshot's
+  `top_line` plus the row), so they stay on their text as more scrolls in.
+  Two handles hang below the ends; a finger within 40 units takes one, and
+  held at the top or bottom edge it scrolls a line each 60 ms. The bar
+  (Copy, Paste) sits above the selection's first line, or below it at the
+  top. Copy sends `do term.copy` ("from_line from_column to_line
+  to_column"); the Shell answers with `Terminal::copy_text` in the snapshot
+  `term.copied`, and the widget gives it to `stage.clipboard()`. Paste reads
+  the clipboard whole, makes it `sq::term::paste_text`, and sends it as
+  `term.input` in pieces of 1 KB as the rings take them, a frame at a time
+  (the paste's buffer, about twice its size, is freed when it is sent).
+  A tap elsewhere, or a key, puts the selection away.
 - **Glyphs** (one for the process): JetBrains Mono NL regular and bold,
   mapped from the APK (stored uncompressed), Android's fonts for what they
   lack; a 1024 x 1024 coverage atlas and its alpha texture, which takes only

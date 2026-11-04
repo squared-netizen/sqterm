@@ -11,6 +11,11 @@
 // dropped: Enter closes sqterm (the widget sees term.completed and quits the
 // app). One session for now; with several (later), only the last one's end
 // will close the app.
+//
+// A selection's text (do term.copy, two places) is made here, where the
+// scrollback is: Terminal::copy_text into the snapshot term.copied, which the
+// widget gives the clipboard. A selection may run back through the whole
+// scrollback, so it is never sent through the rings' text.
 
 #include "sqterm.hpp"
 
@@ -108,6 +113,8 @@ void Shell::receive(sq::messaging::Telegraph& t, const sq::messaging::Received& 
             pty_.resize(columns, rows);
             publish(t);
         }
+    } else if (to == addresses::copy.name()) {
+        copy(t, received.data);
     } else if (to == addresses::scroll.name()) {
         const std::int64_t lines = received.telegram.as_integer();
         publisher_.scroll_back(lines > 0 ? static_cast<std::size_t>(lines) : 0);
@@ -165,6 +172,40 @@ void Shell::complete(sq::messaging::Telegraph& t) {
         publisher_.scroll_back(0);  // the words are at the bottom
     }
     static_cast<void>(t.state(addresses::completed, true));
+}
+
+void Shell::copy(sq::messaging::Telegraph& t, std::span<const std::byte> asked) {
+    // "from_line from_column to_line to_column", decimal.
+    const std::string_view text(reinterpret_cast<const char*>(asked.data()), asked.size());
+    std::array<std::uint64_t, 4> number{};
+    const char* at = text.data();
+    const char* const end = text.data() + text.size();
+    for (std::uint64_t& n : number) {
+        while (at < end && *at == ' ') {
+            ++at;
+        }
+        const std::from_chars_result read = std::from_chars(at, end, n);
+        if (read.ec != std::errc{}) {
+            return;  // not what the widget sends
+        }
+        at = read.ptr;
+    }
+    const auto column = [](std::uint64_t n) {
+        return static_cast<std::uint16_t>(std::min<std::uint64_t>(n, 0xFFFF));
+    };
+    const sq::term::TextPoint from{.line = number[0], .column = column(number[1])};
+    const sq::term::TextPoint to{.line = number[2], .column = column(number[3])};
+    const std::size_t size = terminal_.copy_text(from, to, {});
+    if (size == 0) {
+        return;  // nothing to copy: the clipboard keeps what it had
+    }
+    const std::span<std::byte> room = t.snapshot(addresses::copied, size);
+    if (room.size() < size) {
+        return;
+    }
+    const std::span<char> out(reinterpret_cast<char*>(room.data()), size);
+    static_cast<void>(terminal_.copy_text(from, to, out));
+    static_cast<void>(t.publish(addresses::copied, size));
 }
 
 void Shell::say(std::string_view text) {

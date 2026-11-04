@@ -8,7 +8,9 @@
 //                 output fed to a Terminal, the screen published as a
 //                 snapshot; keys and the size come in as telegrams.
 //   TerminalView  the widget, on the UI thread: the newest screen drawn
-//                 from one glyph texture; what is typed sent to the Shell.
+//                 from one glyph texture; what is typed sent to the Shell;
+//                 a selection (long press, two handles, a Copy and Paste
+//                 bar), its text made by the Shell, the clipboard's pasted.
 //   Glyphs        the fonts (mapped from the APK), the glyph atlas and its
 //                 texture: one for the process, kept while windows come
 //                 and go.
@@ -36,6 +38,11 @@ inline constexpr sq::messaging::Key<std::int64_t, sq::messaging::do_> scroll{"te
 inline constexpr sq::messaging::SnapshotKey screen{"term.screen"};
 /// The shell has ended: Enter now closes sqterm.
 inline constexpr sq::messaging::Key<bool, sq::messaging::state> completed{"term.completed"};
+/// A selection's text, asked for: "from_line from_column to_line to_column"
+/// (sq::term::TextPoint's, decimal), either way round.
+inline constexpr sq::messaging::Key<std::string_view, sq::messaging::do_> copy{"term.copy"};
+/// That text, UTF-8, as Terminal::copy_text makes it: for the clipboard.
+inline constexpr sq::messaging::SnapshotKey copied{"term.copied"};
 
 }  // namespace addresses
 
@@ -63,6 +70,7 @@ private:
     void spawn(sq::messaging::Telegraph& t);
     void ended(sq::messaging::Telegraph& t);
     void complete(sq::messaging::Telegraph& t);
+    void copy(sq::messaging::Telegraph& t, std::span<const std::byte> asked);
     void publish(sq::messaging::Telegraph& t);
     void say(std::string_view text);
 
@@ -152,15 +160,66 @@ protected:
     void input_event(sq::gui::InputEvent& event) override;
 
 private:
+    /// The Copy and Paste bar's buttons, in the widget's units.
+    struct Bar {
+        sq::gui::Rectangle copy{};  ///< empty with Paste alone
+        sq::gui::Rectangle paste{};
+    };
+    enum class Button : std::uint8_t { none, copy, paste };
+
     void fit() noexcept;
     void send(std::string_view bytes) noexcept;
+
+    // The selection (12.4).
+    [[nodiscard]] sq::term::TextPoint point_at(float x, float y) const noexcept;
+    [[nodiscard]] std::optional<std::pair<sq::term::TextPoint, sq::term::TextPoint>> word_at(
+        sq::term::TextPoint at) const noexcept;
+    /// The selection's two ends, the first one first.
+    [[nodiscard]] std::pair<sq::term::TextPoint, sq::term::TextPoint> ends() const noexcept;
+    /// Where a handle hangs, below its end's cell; nothing when off screen.
+    [[nodiscard]] std::optional<std::pair<float, float>> handle_at(sq::term::TextPoint end,
+                                                                   bool first) const noexcept;
+    [[nodiscard]] Bar bar() const noexcept;
+    [[nodiscard]] Button button_at(float x, float y) const noexcept;
+    void long_press() noexcept;
+    void clear_selection() noexcept;
+    void copy_selection() noexcept;
+    void start_paste() noexcept;
+    void send_paste() noexcept;
+    void follow_finger(double delta_seconds) noexcept;
+    void paint_selection(sq::gui::Painter& painter, float x0, float y0) const;
 
     sq::Stage& stage_;
     Glyphs& glyphs_;
     std::optional<sq::term::ScreenView> view_;
     std::uint64_t sequence_ = 0;
-    float scale_ = 0.0F;   ///< pixels to a logical unit
-    float cell_w_ = 0.0F;  ///< a cell, in logical units
+    std::uint64_t copied_sequence_ = 0;  ///< the last copied text given to the clipboard
+    /// A paste being sent, in pieces the Telegraph takes (empty: none).
+    std::string paste_;
+    std::size_t pasted_ = 0;
+    sq::term::TextPoint anchor_{};  ///< the selection's end that stays
+    sq::term::TextPoint head_{};    ///< the end a finger moves
+    std::uint64_t bar_line_ = 0;    ///< the line the bar sits by
+    /// Where the bar is centred: set when it is shown, never by a later
+    /// touch (a tap on the bar must not move it under the finger).
+    float bar_x_ = 0.0F;
+    float press_x_ = 0.0F;  ///< where the finger went down
+    float press_y_ = 0.0F;
+    float finger_x_ = 0.0F;  ///< where it is, moving a handle
+    float finger_y_ = 0.0F;
+    float grab_offset_ = 0.0F;  ///< a handle's finger is this far below its line
+    double held_ = 0.0;         ///< seconds down without moving
+    double scroll_wait_ = 0.0;  ///< seconds since a handle at the edge scrolled
+    Button pressed_ = Button::none;
+    bool pressing_ = false;    ///< down, not moved: may become a long press
+    bool moved_ = false;       ///< moved past a tap
+    bool selecting_ = false;   ///< a selection is shown
+    bool grabbing_ = false;    ///< a finger moves the head
+    bool word_held_ = false;   ///< a long press's word, kept whole while the finger is on it
+    bool bar_shown_ = false;   ///< the bar is shown
+    bool paste_only_ = false;  ///< with Paste alone
+    float scale_ = 0.0F;       ///< pixels to a logical unit
+    float cell_w_ = 0.0F;      ///< a cell, in logical units
     float cell_h_ = 0.0F;
     std::uint16_t columns_ = 0;  ///< the grid asked of the Shell
     std::uint16_t rows_ = 0;

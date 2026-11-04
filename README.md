@@ -13,9 +13,16 @@ Where it stands (Sprint 12 of the squared plan):
   Down), a drag to scroll back, rotation. When the shell exits it says so as
   Termux does (`[Process completed (code 0) - press Enter]`), and Enter
   closes sqterm.
-- Next: 12.4 input (paste, selection), 12.5 the prefix and `pkg` (zsh, the
-  clang stack, neovim, bundled in the APK and installed from it), 12.6
-  running in the background, 12.7 Android from the shell.
+- 12.4, copy and paste, as Termux does: a long press selects the word under
+  the finger and a drag that follows moves its end; two handles move either
+  end, and dragged to the top or bottom edge they scroll, so a selection
+  runs through the whole scrollback; a bar above it has Copy and Paste; a
+  long press on blank space shows Paste alone; a tap elsewhere or a key puts
+  it away. A paste goes in as Termux sends one (escapes out, newlines as
+  Enter, bracketed when the program asks).
+- Next: 12.6 running in the background (the wake lock, its notification),
+  then 12.5 the prefix and `pkg` (zsh, the clang stack, neovim, bundled in
+  the APK and installed from it), 12.7 Android from the shell.
 
 ## Build and install
 
