@@ -55,6 +55,12 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
   `term.input` in pieces of 1 KB as the rings take them, a frame at a time
   (the paste's buffer, about twice its size, is freed when it is sent).
   A tap elsewhere, or a key, puts the selection away.
+- **Running in the background** (12.6, `main.cpp`):
+  `app.keep_running({.title = "sqterm", .text = "1 session"})` once the
+  Shell runs, with `BACKGROUND=1` in the Makefile: squared's foreground
+  service keeps the process (and the shell) alive with sqterm off the screen.
+  Exit in the notification is a quit (the shell ends); a quit, Enter after
+  the shell ended included, stops the service.
 - **Glyphs** (one for the process): JetBrains Mono NL regular and bold,
   mapped from the APK (stored uncompressed), Android's fonts for what they
   lack; a 1024 x 1024 coverage atlas and its alpha texture, which takes only

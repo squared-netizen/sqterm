@@ -68,6 +68,12 @@ BUILD    ?= build
 # (SQ_STORED, mk/squared_android_package.mk); the bundled packages will be too.
 SQ_TARGET_SDK ?= 28
 
+# sqterm keeps running in the background while a shell runs (12.6), as
+# Termux does: squared's foreground service, its notification (Exit, Acquire
+# / Release wakelock), packed by BACKGROUND=1 (mk/squared_android_package.mk).
+# Without it Android freezes the shell soon after sqterm leaves the screen.
+BACKGROUND ?= 1
+
 include mk/squared_generated.mk
 -include $(wildcard mk/pkg_*.mk)
 -include $(wildcard mk/kit_*.mk)

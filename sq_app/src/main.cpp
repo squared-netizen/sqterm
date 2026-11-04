@@ -7,7 +7,9 @@
 // widget as a custom node, gives the Stage the glyphs' surface hook (their
 // texture comes back after Android takes the surface away), and shows the
 // one screen. The shell's home is the app's private files: files/home.
-// It also keeps the App, for quit_app (Enter after the shell has ended).
+// It also keeps the App, for quit_app (Enter after the shell has ended), and
+// keeps sqterm running in the background while the shell runs (12.6): the
+// notification Termux has, with Exit and the wake lock (BACKGROUND=1).
 
 #include "sqterm.hpp"
 
@@ -47,6 +49,7 @@ void squared_main(sq::App& app) {
         places.tmp = files->resolve_platform_path(FileType::Local, "tmp");
     }
     app.run<sqterm::Shell>(std::move(places));
+    static_cast<void>(app.keep_running({.title = "sqterm", .text = "1 session"}));
     app.stage.add<sqterm::Screen>();  // by its name: so Android can keep it
     app.stage.custom("terminal_view", &sqterm::make_terminal);
     app.stage.on_surface(&sqterm::Glyphs::restore, &sqterm::glyphs());

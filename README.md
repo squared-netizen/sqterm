@@ -20,9 +20,14 @@ Where it stands (Sprint 12 of the squared plan):
   long press on blank space shows Paste alone; a tap elsewhere or a key puts
   it away. A paste goes in as Termux sends one (escapes out, newlines as
   Enter, bracketed when the program asks).
-- Next: 12.6 running in the background (the wake lock, its notification),
-  then 12.5 the prefix and `pkg` (zsh, the clang stack, neovim, bundled in
-  the APK and installed from it), 12.7 Android from the shell.
+- 12.6, running in the background, as Termux does: while the shell runs, a
+  notification ("1 session") keeps sqterm's process alive off the screen;
+  tapped, it opens sqterm; Exit ends the shell and closes sqterm; Acquire
+  wakelock keeps it running with the screen off. A swipe from the recent
+  apps leaves the shell running.
+- Next: pinch zoom (12.6b), then 12.5 the prefix and `pkg` (zsh, the clang
+  stack, neovim, bundled in the APK and installed from it), 12.7 Android
+  from the shell.
 
 ## Build and install
 
