@@ -102,6 +102,11 @@ bool Glyphs::regenerate(void* context, sq::graphics::TextureRecoveryTarget& targ
                                self.atlas_.pixels().data());
 }
 
+void Glyphs::forget_texture() noexcept {
+    texture_.invalidate();
+    uploaded_generation_ = 0;  // made whole again at the next upload
+}
+
 void Glyphs::restore(void* context, sq::graphics::Context& graphics) noexcept {
     auto& self = *static_cast<Glyphs*>(context);
     if (self.texture_.restorable()) {

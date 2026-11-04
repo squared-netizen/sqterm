@@ -144,6 +144,12 @@ TerminalView::TerminalView(sq::Stage& stage, Glyphs& glyphs) noexcept
     }
 }
 
+TerminalView::~TerminalView() {
+    // The Stage lets go of its widgets as the activity goes: so does the
+    // glyphs' texture, which belongs to that activity's GL context.
+    glyphs_.forget_texture();
+}
+
 sq::gui::Size TerminalView::preferred_size(sq::gui::Painter& /*painter*/,
                                            const sq::gui::Skin& /*skin*/) const {
     return {320.0F, 240.0F};  // it grows to fill the screen

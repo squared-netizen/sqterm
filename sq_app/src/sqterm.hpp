@@ -121,6 +121,13 @@ public:
     /// The Stage's surface hook: the texture back after Android took the surface.
     static void restore(void* context, sq::graphics::Context& graphics) noexcept;
 
+    /// The activity's context is going (the widget that draws them goes with
+    /// it): the texture is forgotten, without a GL call, and made again in the
+    /// next one. The glyphs are the process's and outlive an activity; a
+    /// texture does not (2026-11-04: after Exit, the process stayed, and the
+    /// next launch drew with the old context's texture name: blocks).
+    void forget_texture() noexcept;
+
 private:
     static bool regenerate(void* context, sq::graphics::TextureRecoveryTarget& target) noexcept;
 
@@ -142,6 +149,11 @@ Glyphs& glyphs();
 class TerminalView final : public sq::gui::Widget {
 public:
     TerminalView(sq::Stage& stage, Glyphs& glyphs) noexcept;
+    ~TerminalView() override;
+    TerminalView(const TerminalView&) = delete;
+    TerminalView& operator=(const TerminalView&) = delete;
+    TerminalView(TerminalView&&) = delete;
+    TerminalView& operator=(TerminalView&&) = delete;
 
     [[nodiscard]] sq::gui::Size preferred_size(sq::gui::Painter& painter,
                                                const sq::gui::Skin& skin) const override;
