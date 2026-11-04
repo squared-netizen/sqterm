@@ -8,7 +8,8 @@
 // first, then the glyphs, then underlines, so the painter's batch changes
 // texture twice a frame, not twice a cell. What is typed goes to the Shell
 // as the bytes a program reads (sq::term::key_bytes); a vertical drag
-// scrolls back into the scrollback.
+// scrolls back into the scrollback. Once the shell has ended
+// (term.completed), Enter closes sqterm and nothing else is sent.
 
 #include "sqterm.hpp"
 
@@ -333,6 +334,13 @@ void TerminalView::input_event(sq::gui::InputEvent& event) {
 }
 
 void TerminalView::send(std::string_view bytes) noexcept {
+    if (stage_.telegraph().value(addresses::completed).value_or(false)) {
+        // The shell has ended: Enter closes sqterm, the rest is dropped.
+        if (bytes.find_first_of("\r\n") != std::string_view::npos) {
+            quit_app();
+        }
+        return;
+    }
     if (scrolled_ != 0) {
         scrolled_ = 0;  // the Shell goes back to the prompt for a key
     }

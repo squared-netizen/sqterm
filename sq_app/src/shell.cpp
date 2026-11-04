@@ -6,9 +6,11 @@
 // UI sends keys or a size, or Android's lifecycle reaches it: no tick, no
 // polling. Each time the shell writes, what it wrote goes through the
 // Terminal and the whole screen is published as a snapshot; the UI draws the
-// newest one. When the shell ends, the terminal says so and a new one starts
-// below; one that ended within two seconds of starting waits for a key
-// first, so a shell that cannot start does not start again and again.
+// newest one. When the shell ends, the terminal says so as Termux does,
+// `[Process completed (code N) - press Enter]`, and what is typed after is
+// dropped: Enter closes sqterm (the widget sees term.completed and quits the
+// app). One session for now; with several (later), only the last one's end
+// will close the app.
 
 #include "sqterm.hpp"
 
@@ -20,9 +22,6 @@ namespace {
 /// still shows, and keys still get through.
 constexpr std::size_t read_per_turn = std::size_t{256} * 1024;
 constexpr std::size_t buffer_bytes = std::size_t{16} * 1024;
-
-/// How long a shell must have run to be started again without a key.
-constexpr auto quick_end = std::chrono::seconds(2);
 
 /// Writing keys waits no longer than this for a shell that is not reading.
 constexpr int key_wait_ms = 100;
@@ -60,7 +59,6 @@ void Shell::start(sq::messaging::Telegraph& t) {
 }
 
 void Shell::spawn(sq::messaging::Telegraph& t) {
-    waiting_ = false;
     pty_ = sq::term::Pty{};
     const sq::term::PtyConfig config{
         .program = shell_program,
@@ -72,15 +70,15 @@ void Shell::spawn(sq::messaging::Telegraph& t) {
     };
     if (const sq::term::PtyError error = pty_.spawn(config)) {
         std::array<char, 160> line{};
-        const int n = std::snprintf(
-            line.data(), line.size(), "\r\n[sqterm: %.*s (errno %d); a key tries again]\r\n",
-            static_cast<int>(error.what().size()), error.what().data(), error.system_error);
+        const int n = std::snprintf(line.data(), line.size(), "\r\n[sqterm: %.*s (errno %d)]\r\n",
+                                    static_cast<int>(error.what().size()), error.what().data(),
+                                    error.system_error);
         say({line.data(), static_cast<std::size_t>(n > 0 ? n : 0)});
-        waiting_ = true;
+        say("[Process completed - press Enter]");
+        complete(t);
         publish(t);
         return;
     }
-    started_ = std::chrono::steady_clock::now();
     if (!t.watch(pty_.fd())) {
         say("\r\n[sqterm: cannot watch the shell]\r\n");
     }
@@ -90,9 +88,8 @@ void Shell::spawn(sq::messaging::Telegraph& t) {
 void Shell::receive(sq::messaging::Telegraph& t, const sq::messaging::Received& received) {
     const sq::messaging::Name to = received.telegram.address().name;
     if (to == addresses::input.name()) {
-        if (waiting_) {
-            spawn(t);
-            return;
+        if (completed_) {
+            return;  // Enter closes the app: the widget's to do
         }
         if (publisher_.scrolled_back() != 0) {
             publisher_.scroll_back(0);  // typing goes back to the prompt
@@ -150,18 +147,24 @@ void Shell::ended(sq::messaging::Telegraph& t) {
     const std::optional<sq::term::ProcessExit> exit = pty_.poll_exit();
     std::array<char, 96> line{};
     int n = 0;
+    // Termux's words, on a line of their own.
     if (exit && exit->signal != 0) {
-        n = std::snprintf(line.data(), line.size(), "\r\n[exited: signal %d]\r\n", exit->signal);
+        n = std::snprintf(line.data(), line.size(),
+                          "\r\n[Process completed (signal %d) - press Enter]", exit->signal);
     } else {
-        n = std::snprintf(line.data(), line.size(), "\r\n[exited %d]\r\n", exit ? exit->code : 0);
+        n = std::snprintf(line.data(), line.size(),
+                          "\r\n[Process completed (code %d) - press Enter]", exit ? exit->code : 0);
     }
     say({line.data(), static_cast<std::size_t>(n > 0 ? n : 0)});
-    if (std::chrono::steady_clock::now() - started_ < quick_end) {
-        say("[it ended at once: a key starts it again]\r\n");
-        waiting_ = true;
-        return;
+    complete(t);
+}
+
+void Shell::complete(sq::messaging::Telegraph& t) {
+    completed_ = true;
+    if (publisher_.scrolled_back() != 0) {
+        publisher_.scroll_back(0);  // the words are at the bottom
     }
-    spawn(t);
+    static_cast<void>(t.state(addresses::completed, true));
 }
 
 void Shell::say(std::string_view text) {

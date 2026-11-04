@@ -10,8 +10,9 @@ Where it stands (Sprint 12 of the squared plan):
 - 12.3d, this: the first APK. Android's own shell (`/system/bin/sh`) in a
   pty on the model's thread, its screen drawn with JetBrains Mono from one
   glyph texture, typing (a keyboard's Ctrl, Alt, arrows, F-keys, Page Up and
-  Down), a drag to scroll back, rotation. When the shell exits it says so and
-  starts again.
+  Down), a drag to scroll back, rotation. When the shell exits it says so as
+  Termux does (`[Process completed (code 0) - press Enter]`), and Enter
+  closes sqterm.
 - Next: 12.4 input (paste, selection), 12.5 the prefix and `pkg` (zsh, the
   clang stack, neovim, bundled in the APK and installed from it), 12.6
   running in the background, 12.7 Android from the shell.

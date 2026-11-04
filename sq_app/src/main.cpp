@@ -7,10 +7,24 @@
 // widget as a custom node, gives the Stage the glyphs' surface hook (their
 // texture comes back after Android takes the surface away), and shows the
 // one screen. The shell's home is the app's private files: files/home.
+// It also keeps the App, for quit_app (Enter after the shell has ended).
 
 #include "sqterm.hpp"
 
 namespace sqterm {
+
+namespace {
+
+/// The one App of the process, named by squared_main (UI thread only).
+sq::App* the_app = nullptr;
+
+}  // namespace
+
+void quit_app() noexcept {
+    if (the_app != nullptr) {
+        the_app->quit();
+    }
+}
 
 void Screen::build(sq::gui::LayoutWriter& root) {
     root.add_custom("terminal_view").grow();
@@ -23,6 +37,7 @@ std::unique_ptr<sq::gui::Widget> make_terminal(sq::Stage& stage) {
 }  // namespace sqterm
 
 void squared_main(sq::App& app) {
+    sqterm::the_app = &app;
     sqterm::Places places;
     if (sq::files::FileSystem* files = app.stage.files()) {
         using sq::files::FileType;

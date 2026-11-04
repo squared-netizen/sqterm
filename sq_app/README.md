@@ -20,19 +20,24 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
                -- do term.size   (columns, rows)    -->       |  (watched: wakes
                -- do term.scroll (lines back)       -->       |   when sh writes)
                <-- snapshot term.screen (the whole screen) -- Terminal + ScreenPublisher
+               <-- state term.completed (the shell ended) --
 ```
 
 - **Shell** (the model) watches the pty's descriptor (`Telegraph::watch`):
   it sleeps until the shell writes, a key comes, or Android's lifecycle
   reaches it. What the shell writes is fed to a `sq::term::Terminal`, and
   the screen is published whole (`sq::term::ScreenPublisher`). When the
-  shell exits, the terminal says `[exited N]` and a new one starts; one that
-  ended within two seconds of starting waits for a key.
+  shell exits, the terminal says so as Termux does (`[Process completed
+  (code N) - press Enter]`, or `(signal N)`), sets the state
+  `term.completed`, and drops what is typed after.
 - **TerminalView** (a custom node, `Stage::custom`) reads the newest screen
   each frame, puts the glyphs it shows into the atlas, and paints:
   backgrounds, then glyphs, then underlines. Named keys go through
   `sq::term::key_bytes`, Ctrl and Alt with a character through
-  `key_text_bytes`, typed text as it is. A vertical drag scrolls back.
+  `key_text_bytes`, typed text as it is. A vertical drag scrolls back. Once
+  `term.completed` is true, Enter calls `quit_app()` (the App kept by
+  `squared_main`): the model stops, Android closes the activity, and the
+  next launch starts a new shell.
 - **Glyphs** (one for the process): JetBrains Mono NL regular and bold,
   mapped from the APK (stored uncompressed), Android's fonts for what they
   lack; a 1024 x 1024 coverage atlas and its alpha texture, which takes only

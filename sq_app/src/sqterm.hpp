@@ -34,6 +34,8 @@ inline constexpr sq::messaging::Key<std::array<float, 2>, sq::messaging::do_> si
 inline constexpr sq::messaging::Key<std::int64_t, sq::messaging::do_> scroll{"term.scroll"};
 /// The screen, as sq::term::ScreenPublisher writes it.
 inline constexpr sq::messaging::SnapshotKey screen{"term.screen"};
+/// The shell has ended: Enter now closes sqterm.
+inline constexpr sq::messaging::Key<bool, sq::messaging::state> completed{"term.completed"};
 
 }  // namespace addresses
 
@@ -60,6 +62,7 @@ public:
 private:
     void spawn(sq::messaging::Telegraph& t);
     void ended(sq::messaging::Telegraph& t);
+    void complete(sq::messaging::Telegraph& t);
     void publish(sq::messaging::Telegraph& t);
     void say(std::string_view text);
 
@@ -71,9 +74,8 @@ private:
     sq::term::Pty pty_;
     sq::term::ScreenPublisher publisher_;
     std::unique_ptr<std::byte[]> buffer_;
-    std::chrono::steady_clock::time_point started_{};
-    /// The shell ended quickly: started again only when a key is typed.
-    bool waiting_ = false;
+    /// The shell has ended (or never started): what is typed is dropped.
+    bool completed_ = false;
 };
 
 /// The fonts, the atlas and its texture. UI thread only.
@@ -176,5 +178,10 @@ struct Screen {
 
 /// The custom node's maker (Stage::custom).
 std::unique_ptr<sq::gui::Widget> make_terminal(sq::Stage& stage);
+
+/// Close sqterm, as Termux does after its last session: the model stops
+/// (the shell with it) and Android closes the activity; the next launch
+/// starts afresh. The App is the one squared_main was given.
+void quit_app() noexcept;
 
 }  // namespace sqterm
