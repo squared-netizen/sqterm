@@ -13,7 +13,7 @@
 namespace sqterm {
 
 void Screen::build(sq::gui::LayoutWriter& root) {
-    root.add_custom("terminal").grow();
+    root.add_custom("terminal_view").grow();
 }
 
 std::unique_ptr<sq::gui::Widget> make_terminal(sq::Stage& stage) {
@@ -32,7 +32,8 @@ void squared_main(sq::App& app) {
         places.tmp = files->resolve_platform_path(FileType::Local, "tmp");
     }
     app.run<sqterm::Shell>(std::move(places));
-    app.stage.custom("terminal", &sqterm::make_terminal);
+    app.stage.add<sqterm::Screen>();  // by its name: so Android can keep it
+    app.stage.custom("terminal_view", &sqterm::make_terminal);
     app.stage.on_surface(&sqterm::Glyphs::restore, &sqterm::glyphs());
     app.stage.push<sqterm::Screen>();
 }
