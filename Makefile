@@ -24,6 +24,8 @@
 #   make status          what the build found on this host
 #   make squared-core    build the vendored framework
 #   make android-help    every target and override
+#   make packages        build the prefix's packages (zsh, ncurses) into the
+#                        APK's assets: packages/build.sh (12.5)
 #   make clean
 #   make V=1             every command in full (a build prints one short line
 #                        per step: mk/squared_generated.mk)
@@ -65,8 +67,10 @@ BUILD    ?= build
 # Android 10 and later allow only to an app that targets SDK 28 or older: it is
 # side-loaded, never on Google Play. The minimum stays 22 (Android 5.1, the
 # tablet). Its fonts are stored uncompressed and mapped from the APK
-# (SQ_STORED, mk/squared_android_package.mk); the bundled packages will be too.
+# (SQ_STORED, mk/squared_android_package.mk), and so are the bundled packages
+# (.tar.zst, already compressed: packages/build.sh writes them).
 SQ_TARGET_SDK ?= 28
+SQ_STORED ?= ttf otf ttc zst
 
 # sqterm keeps running in the background while a shell runs (12.6), as
 # Termux does: squared's foreground service, its notification (Exit, Acquire
@@ -114,13 +118,16 @@ SQ_SO := $(BUILD)/lib$(SQ_PROJECT).so
 APP_SRC  := $(shell find sq_app/src -name '*.cpp' 2>/dev/null | sort)
 PLAT_SRC := $(shell find sq_android -maxdepth 1 -name '*.cpp' 2>/dev/null | sort)
 CXX_SRC  := $(APP_SRC) $(PLAT_SRC) $(SQ_KIT_SRC)
+# C code sqterm carries from elsewhere: zstd's decoder, for the packages (12.5).
+THIRD_C  := $(shell find sq_app/third_party -name '*.c' 2>/dev/null | sort)
 
 CXX_OBJ  := $(patsubst %.cpp,$(BUILD)/%.o,$(CXX_SRC))
+C_OBJ    := $(patsubst %.c,$(BUILD)/%.o,$(THIRD_C))
 GLUE_OBJ := $(BUILD)/glue/android_native_app_glue.o
-OBJ      := $(CXX_OBJ) $(GLUE_OBJ)
-DEPS     := $(CXX_OBJ:.o=.d)
+OBJ      := $(CXX_OBJ) $(C_OBJ) $(GLUE_OBJ)
+DEPS     := $(CXX_OBJ:.o=.d) $(C_OBJ:.o=.d)
 
-CPPFLAGS += $(SQ_CPPFLAGS) $(SQ_KIT_CPPFLAGS)
+CPPFLAGS += $(SQ_CPPFLAGS) $(SQ_KIT_CPPFLAGS) -Isq_app/third_party/zstd
 CXXFLAGS += -std=$(CXXSTD) $(OPT) $(WARN) -fPIC -fvisibility=hidden
 # An unresolved symbol is a link error here, not a library that installs and then
 # fails to load on the device with "cannot locate symbol". (Switch it off with
@@ -214,6 +221,19 @@ $(BUILD)/%.o: %.cpp $(SQ_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(call sq_say,cc,$<)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+# Third-party C, with its own warnings left alone, its symbols kept inside
+# the library.
+$(BUILD)/sq_app/third_party/%.o: sq_app/third_party/%.c $(SQ_FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(call sq_say,cc,$<)
+	$(CC) $(SQ_CPPFLAGS) $(OPT) -fPIC -fvisibility=hidden -MMD -MP -c $< -o $@
+
+# The prefix's packages (12.5), into sq_android/assets/packages/: run when
+# asked, not by every build (a first one takes several minutes).
+.PHONY: packages
+packages:
+	bash packages/build.sh
 
 # The native-app-glue is compiled from the NDK rather than vendored into the
 # project: it is part of the platform, it is versioned with the NDK, and a

@@ -10,6 +10,8 @@ src/main.cpp           squared_main: the model, the widget, the screen
 src/shell.cpp          the model: the shell in a pty, on the model's thread
 src/terminal_view.cpp  the widget: the screen drawn, keys sent
 src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its texture
+src/prefix.cpp         the prefix: the APK's packages copied out, unpacked (tar + zstd)
+third_party/zstd/      zstd's decoder (one C file) and its headers
 ```
 
 ## How it fits together
@@ -65,6 +67,23 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
   rotation makes the widget again), read from the app's files
   (`terminal.font`, the percent and a newline) at the first fit and written
   as the fingers lift.
+- **The prefix** (12.5, `prefix.cpp`): `squared_main` makes `files/home`
+  and `files/usr/tmp`, and calls `stage_packages`: the APK's
+  `assets/packages/index` against `usr/var/lib/sqterm/packages`, the one
+  last installed. When they differ, each archive is copied out of the APK
+  (mapped: they are stored uncompressed) into `usr/var/cache/sqterm/`, so
+  the model's thread reads plain files whatever happens to the activity. The
+  Shell's `start` unpacks them into `files/usr` before the shell (the
+  terminal says `[sqterm: unpacking zsh 5.9.2]` for each), removes the
+  copies, and records the index. The reader takes ustar (files, directories,
+  symbolic links, hard links as copies, the 155-byte prefix field), unlinks
+  before it writes (a running program cannot be written over), and refuses a
+  name or a link with `..` or a leading `/`. Then the shell is the prefix's
+  zsh, as a login shell (`-l`), or Android's sh when there is none. Its
+  environment: `TERM=sqterm`, `COLORTERM`, `LANG`, `HOME`, `TMPDIR`
+  (`$PREFIX/tmp`, where zsh puts here-documents), `PREFIX`, `PATH`
+  (`$PREFIX/bin` first, then `/system/bin`), `SHELL`, `SQTERM`, and
+  Android's `ANDROID_DATA` and `ANDROID_ROOT`.
 - **Running in the background** (12.6, `main.cpp`):
   `app.keep_running({.title = "sqterm", .text = "1 session"})` once the
   Shell runs, with `BACKGROUND=1` in the Makefile: squared's foreground
@@ -81,7 +100,14 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
 
 The model: the Terminal (two 80 x 24 grids to start, then the screen's
 size, and a 1 MB scrollback), a 16 KB read buffer, the three snapshot buffers
-(the screen, 12 bytes a cell). The UI: the atlas's 1 MB image and its 1 MB
+(the screen, 12 bytes a cell).
+
+The prefix, while it unpacks (the first start, and after an update with new
+packages): zstd's decoder (about 100 KB) and its window (1 MB), 64 KB of
+input and 128 KB of output, freed when it is done; the archives' copies on
+disk until each is unpacked. Nothing after.
+
+The UI: the atlas's 1 MB image and its 1 MB
 texture on the GPU (the same at every font size: bigger glyphs fill it
 sooner), FreeType's faces (about 100 KB each), the fonts' mapped
 pages (clean, only what is read).

@@ -18,3 +18,22 @@ Portions of this software are copyright © The FreeType Project
 
 Licensed under the FreeType Project License:
 `squared/third_party/freetype/FTL.TXT`.
+
+## Zstandard
+
+`sq_app/third_party/zstd/`: zstd 1.5.7's decoder, as its
+`build/single_file_libs/create_single_file_decoder.sh` amalgamates it
+(`zstddeclib.c`), with `zstd.h` and `zstd_errors.h`. Copyright (c) Meta
+Platforms, Inc. and affiliates. Licensed under the BSD licence:
+`sq_app/third_party/zstd/LICENSE` (zstd is dual-licensed; sqterm takes the
+BSD one).
+
+## The prefix's packages
+
+The packages `make packages` builds (`packages/`), which the APK carries and
+unpacks into sqterm's prefix, are other projects' software: ncurses (an
+X11-style licence) and zsh (its own permissive licence). Each package carries
+its licence, installed under `$PREFIX/share/licenses/<name>/`. The recipes
+make a few changes for Android after the ones Termux's packages make
+(termux-packages, Apache License 2.0), written again for these recipes, not
+copied.

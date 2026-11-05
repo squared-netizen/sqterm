@@ -46,11 +46,33 @@ inline constexpr sq::messaging::SnapshotKey copied{"term.copied"};
 
 }  // namespace addresses
 
+/// A package copied out of the APK, to be unpacked into the prefix.
+struct Staged {
+    std::string name;     ///< "zsh 5.9.2": what the terminal says it unpacks
+    std::string archive;  ///< the copy's path: a .tar.zst
+};
+
 /// Where the shell runs: given by squared_main, from the app's private files.
 struct Places {
-    std::string home;  ///< $HOME and where the shell starts
-    std::string tmp;   ///< $TMPDIR
+    std::string home;    ///< $HOME and where the shell starts
+    std::string tmp;     ///< $TMPDIR: the prefix's tmp/
+    std::string prefix;  ///< $PREFIX: files/usr, the packages' (12.5)
+    /// The packages to unpack before the shell starts (stage_packages);
+    /// empty when the prefix holds what the APK carries.
+    std::vector<Staged> staged;
+    std::string index;      ///< the APK's package index, recorded once they are in
+    std::string installed;  ///< where it is recorded
 };
+
+/// The prefix (12.5, prefix.cpp). On the UI thread, as the app starts: when
+/// the APK's packages are not the ones installed, each is copied out of the
+/// APK for the Shell to unpack (into `places.staged`).
+void stage_packages(sq::files::FileSystem& files, Places& places);
+/// On the model's thread: one staged archive (a tar.zst) unpacked into
+/// `prefix`. Empty when it was; else what went wrong.
+[[nodiscard]] std::string unpack_package(std::string_view archive, std::string_view prefix);
+/// The index recorded as installed: the next start copies nothing.
+bool record_installed(const Places& places);
 
 /// The model: the shell in a pty, on the model's thread.
 class Shell final {
@@ -67,6 +89,7 @@ public:
     void readable(sq::messaging::Telegraph& t, int fd);
 
 private:
+    void install(sq::messaging::Telegraph& t);
     void spawn(sq::messaging::Telegraph& t);
     void ended(sq::messaging::Telegraph& t);
     void complete(sq::messaging::Telegraph& t);
@@ -75,9 +98,10 @@ private:
     void say(std::string_view text);
 
     Places places_;
-    std::array<std::string, 8> environment_text_;
-    std::array<std::string_view, 8> environment_{};
+    std::array<std::string, 11> environment_text_;
+    std::array<std::string_view, 11> environment_{};
     std::size_t environment_count_ = 0;
+    std::string program_;  ///< the prefix's zsh, or Android's sh without it
     sq::term::Terminal terminal_;
     sq::term::Pty pty_;
     sq::term::ScreenPublisher publisher_;

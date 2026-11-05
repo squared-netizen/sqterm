@@ -1,0 +1,52 @@
+# sqterm's zshrc ($PREFIX/etc/zshrc): read by every interactive zsh, before
+# your own ~/.zshrc, which can change anything set here. Part of the zsh
+# package: an update of sqterm writes it again, so put your own settings in
+# ~/.zshrc, not here.
+#
+# sqterm sets the environment before zsh starts: PREFIX, HOME, PATH (the
+# prefix's bin first, then Android's), TMPDIR, TERM=sqterm, LANG.
+
+# History, kept between sessions.
+HISTFILE=${HISTFILE:-$HOME/.zsh_history}
+HISTSIZE=10000
+SAVEHIST=10000
+setopt hist_ignore_dups hist_reduce_blanks share_history
+setopt interactive_comments no_beep
+
+# Emacs keys, and the keys sqterm sends, as its terminfo entry names them.
+# The line editor asks for keypad mode while it reads a line, which is what
+# those names describe.
+bindkey -e
+zmodload zsh/terminfo
+typeset -A _sqterm_keys
+_sqterm_keys=(
+  khome beginning-of-line
+  kend  end-of-line
+  kdch1 delete-char
+  kich1 overwrite-mode
+  kpp   up-line-or-history
+  knp   down-line-or-history
+  kcuu1 up-line-or-history
+  kcud1 down-line-or-history
+  kcub1 backward-char
+  kcuf1 forward-char
+  kcbt  reverse-menu-complete
+)
+for _sqterm_name _sqterm_widget in ${(kv)_sqterm_keys}; do
+  [[ -n ${terminfo[$_sqterm_name]} ]] && bindkey -- "${terminfo[$_sqterm_name]}" $_sqterm_widget
+done
+unset _sqterm_keys _sqterm_name _sqterm_widget
+if (( ${+terminfo[smkx]} && ${+terminfo[rmkx]} )); then
+  function zle-line-init { echoti smkx }
+  function zle-line-finish { echoti rmkx }
+  zle -N zle-line-init
+  zle -N zle-line-finish
+fi
+
+# Completion, its cache in the home directory.
+autoload -Uz compinit
+compinit -d "$HOME/.zcompdump"
+zstyle ':completion:*' menu select
+
+# A short prompt: the directory (the home as ~), then % (# for root).
+PROMPT='%F{green}%~%f %# '

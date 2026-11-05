@@ -28,3 +28,7 @@ compile_commands.json
 # vendoring tool and installers leave.
 squared/build/*/
 *.bak.*
+
+# The prefix's packages, as packages/build.sh writes them (12.5): built on
+# the phone (and later by CI), not kept in git. sources.lock is kept.
+/sq_android/assets/packages/

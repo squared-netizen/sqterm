@@ -16,6 +16,13 @@
 // scrollback is: Terminal::copy_text into the snapshot term.copied, which the
 // widget gives the clipboard. A selection may run back through the whole
 // scrollback, so it is never sent through the rings' text.
+//
+// The shell is zsh from sqterm's prefix (12.5): the packages squared_main
+// copied out of the APK are unpacked first, here, on this thread, the
+// terminal saying which as it goes. Without zsh (a build with no packages,
+// or one that did not unpack) it is Android's sh, as before.
+
+#include <unistd.h>
 
 #include "sqterm.hpp"
 
@@ -31,43 +38,87 @@ constexpr std::size_t buffer_bytes = std::size_t{16} * 1024;
 /// Writing keys waits no longer than this for a shell that is not reading.
 constexpr int key_wait_ms = 100;
 
-/// The shell (12.5 brings zsh in sqterm's own prefix; until then Android's).
-constexpr std::string_view shell_program = "/system/bin/sh";
+/// Android's shell: what runs when the prefix has no zsh.
+constexpr std::string_view android_shell = "/system/bin/sh";
+/// zsh as a login shell: it reads $PREFIX/etc/zprofile and ~/.zprofile too.
+constexpr std::array<std::string_view, 1> login{"-l"};
 
 }  // namespace
 
 Shell::Shell(Places places)
     : places_(std::move(places)),
       terminal_(sq::term::TerminalConfig{.columns = 80, .rows = 24}),
-      buffer_(std::make_unique_for_overwrite<std::byte[]>(buffer_bytes)) {
-    // The environment the shell starts with; .zshrc adds the rest (12.5).
-    const std::array<std::string, 8> text{
+      buffer_(std::make_unique_for_overwrite<std::byte[]>(buffer_bytes)) {}
+
+Shell::~Shell() = default;
+
+void Shell::start(sq::messaging::Telegraph& t) {
+    install(t);
+    spawn(t);
+}
+
+void Shell::install(sq::messaging::Telegraph& t) {
+    if (places_.staged.empty()) {
+        return;
+    }
+    bool all = true;
+    for (const Staged& package : places_.staged) {
+        std::array<char, 128> line{};
+        int n = std::snprintf(line.data(), line.size(), "[sqterm: unpacking %s]\r\n",
+                              package.name.c_str());
+        say({line.data(), static_cast<std::size_t>(n > 0 ? n : 0)});
+        publish(t);  // shown as it goes: the first start takes a few seconds
+        const std::string error = unpack_package(package.archive, places_.prefix);
+        if (!error.empty()) {
+            n = std::snprintf(line.data(), line.size(), "[sqterm: %.100s]\r\n", error.c_str());
+            say({line.data(), static_cast<std::size_t>(n > 0 ? n : 0)});
+            all = false;
+            break;
+        }
+        static_cast<void>(std::remove(package.archive.c_str()));
+    }
+    // Recorded only when every one is in: the next start tries again otherwise.
+    if (all && !record_installed(places_)) {
+        say("[sqterm: the packages are in, but could not be recorded]\r\n");
+    }
+    places_.staged.clear();
+    places_.staged.shrink_to_fit();
+    places_.index.clear();
+    places_.index.shrink_to_fit();
+}
+
+void Shell::spawn(sq::messaging::Telegraph& t) {
+    pty_ = sq::term::Pty{};
+    // zsh from the prefix when it is there; Android's sh when it is not.
+    const std::string zsh = places_.prefix + "/bin/zsh";
+    const bool have_zsh = !places_.prefix.empty() && ::access(zsh.c_str(), X_OK) == 0;
+    program_ = have_zsh ? zsh : std::string(android_shell);
+    // The environment the shell starts with; $PREFIX/etc/zshrc and the
+    // user's ~/.zshrc add the rest.
+    const std::string bin = places_.prefix.empty() ? std::string() : places_.prefix + "/bin:";
+    const std::array<std::string, 11> text{
         "TERM=sqterm",
         "COLORTERM=truecolor",
         "LANG=en_US.UTF-8",
         "HOME=" + places_.home,
         "TMPDIR=" + places_.tmp,
-        "PATH=/system/bin:/system/xbin",
-        "SHELL=" + std::string(shell_program),
+        "PREFIX=" + places_.prefix,
+        "PATH=" + bin + "/system/bin:/system/xbin",
+        "SHELL=" + program_,
         "SQTERM=1",
+        // What Android's own tools (am, pm) look for, as an app's process has them.
+        "ANDROID_DATA=/data",
+        "ANDROID_ROOT=/system",
     };
     environment_text_ = text;
+    environment_count_ = 0;
     for (const std::string& line : environment_text_) {
         environment_[environment_count_++] = line;
     }
-}
-
-Shell::~Shell() = default;
-
-void Shell::start(sq::messaging::Telegraph& t) {
-    spawn(t);
-}
-
-void Shell::spawn(sq::messaging::Telegraph& t) {
-    pty_ = sq::term::Pty{};
     const sq::term::PtyConfig config{
-        .program = shell_program,
-        .arguments = {},
+        .program = program_,
+        .arguments = have_zsh ? std::span<const std::string_view>(login)
+                              : std::span<const std::string_view>(),
         .environment = std::span(environment_.data(), environment_count_),
         .directory = places_.home,
         .columns = terminal_.columns(),

@@ -29,17 +29,27 @@ Where it stands (Sprint 12 of the squared plan):
   to 300% in steps of 5, and the grid follows; the size is kept for the next
   launch. (Every squared app zooms its whole UI with a pinch; the terminal
   takes the pinch for its font instead.)
-- Next: 12.5 the prefix and `pkg` (zsh, the clang stack, neovim, bundled in
-  the APK and installed from it), 12.7 Android from the shell.
+- 12.5a, zsh: sqterm's own prefix (`files/usr`, Termux's way), filled from
+  packages the APK carries. `make packages` builds ncurses 6.6 and zsh 5.9.2
+  for it on the phone, with the NDK, for API 22 (`packages/`); the app
+  unpacks them the first time it starts and runs zsh, with PATH, HOME, TERM
+  and a starting `$PREFIX/etc/zshrc`. A build without them runs Android's sh,
+  as before.
+- Next: 12.5 goes on (`pkg`, bash, the GNU tools, the clang stack, neovim;
+  the recipes into GitHub Actions), then 12.7 Android from the shell.
 
 ## Build and install
 
 On the phone, in Termux, from this folder:
 
 ```sh
+make packages # the prefix's packages (once, and when a recipe changes)
 make dev      # a debug build with the Console, installed
 make apk      # a plain APK in build/
 ```
+
+`make packages` needs curl, xz and zstd in Termux (`pkg install curl xz-utils
+zstd`) and the NDK the APK builds use; see `packages/README.md`.
 
 The Makefile's head lists every target.
 
@@ -47,9 +57,13 @@ The Makefile's head lists every target.
 
 ```
 sq_app/src/         the app (yours): main.cpp, shell.cpp (the model),
-                    terminal_view.cpp (the widget), glyphs.cpp (the fonts)
-sq_android/         the platform layer, from the template; assets/fonts/
-terminfo/sqterm.ti  TERM=sqterm: what the emulator implements (12.5 installs it)
+                    terminal_view.cpp (the widget), glyphs.cpp (the fonts),
+                    prefix.cpp (the packages, unpacked)
+sq_app/third_party/ zstd's decoder, for the packages
+sq_android/         the platform layer, from the template; assets/fonts/, and
+                    assets/packages/ once make packages has run (not in git)
+packages/           the prefix's recipes and their build: build.sh, ncurses/, zsh/
+terminfo/sqterm.ti  TERM=sqterm: what the emulator implements (in the ncurses package)
 squared/            the framework, vendored: never edited here
 mk/                 the template's and the package's make fragments
 tools/              vendor_framework.sh: squared from the package

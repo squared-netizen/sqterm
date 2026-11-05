@@ -7,6 +7,9 @@
 // widget as a custom node, gives the Stage the glyphs' surface hook (their
 // texture comes back after Android takes the surface away), and shows the
 // one screen. The shell's home is the app's private files: files/home.
+// Its programs are in sqterm's prefix, files/usr (12.5): the packages the APK
+// carries are copied out here when the prefix does not have them yet, and
+// the Shell unpacks them before it starts zsh.
 // It also keeps the App, for quit_app (Enter after the shell has ended), and
 // keeps sqterm running in the background while the shell runs (12.6): the
 // notification Termux has, with Exit and the wake lock (BACKGROUND=1).
@@ -44,9 +47,11 @@ void squared_main(sq::App& app) {
     if (sq::files::FileSystem* files = app.stage.files()) {
         using sq::files::FileType;
         static_cast<void>(files->make_directories(FileType::Local, "home"));
-        static_cast<void>(files->make_directories(FileType::Local, "tmp"));
+        static_cast<void>(files->make_directories(FileType::Local, "usr/tmp"));
         places.home = files->resolve_platform_path(FileType::Local, "home");
-        places.tmp = files->resolve_platform_path(FileType::Local, "tmp");
+        places.tmp = files->resolve_platform_path(FileType::Local, "usr/tmp");
+        places.prefix = files->resolve_platform_path(FileType::Local, "usr");
+        sqterm::stage_packages(*files, places);
     }
     app.run<sqterm::Shell>(std::move(places));
     static_cast<void>(app.keep_running({.title = "sqterm", .text = "1 session"}));
