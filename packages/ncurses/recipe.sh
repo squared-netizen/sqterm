@@ -30,6 +30,15 @@ recipe_patch() {
 }
 
 recipe_build() {
+  # Android refuses hard links in an app's files (the phone, 2026-11-04: tic's
+  # "cannot link l/lpr to p/printer"): tic makes an entry's other names as
+  # symbolic links. The database is not installed whole (--disable-db-install,
+  # and the install would run whichever tic is on PATH): recipe_after
+  # compiles the entries kept, with the tic built here.
+  # --enable-big-core: configure skips its memory test when it takes the
+  # build for a cross one (the phone, 2026-11-04), and then builds a tic that
+  # refuses -e ("can't be used without -I or -C"), which recipe_after uses.
+  # A phone has the memory.
   # nl_langinfo is API 26 and locale.h's functions are not all there at 22:
   # ncurses takes its charset from the environment instead.
   ./configure ${SQ_HOST_TRIPLE:+--host=$SQ_HOST_TRIPLE --build=$(sh ./config.guess)} \
@@ -38,6 +47,7 @@ recipe_build() {
     --without-ada --without-cxx --without-cxx-binding --without-tests --without-manpages \
     --enable-widec --enable-overwrite --enable-const \
     --enable-ext-colors --enable-ext-mouse --disable-stripping \
+    --enable-symlinks --disable-db-install --enable-big-core \
     --with-default-terminfo-dir="$SQ_PREFIX/share/terminfo" \
     --with-terminfo-dirs="$SQ_PREFIX/share/terminfo" \
     --with-termpath="$SQ_PREFIX/etc/termcap" \
@@ -47,20 +57,19 @@ recipe_build() {
 }
 
 recipe_after() {
-  # The terminfo database, cut to what is used (the whole is 8 MB), with
-  # sqterm's entry added. The tic built here compiles it: on the phone, and
-  # in a host test, it runs where it was built.
-  local full=share/terminfo.full
-  mv share/terminfo "$full"
-  local entries="a/ansi d/dumb l/linux s/screen s/screen-256color t/tmux t/tmux-256color
-                 v/vt100 v/vt102 v/vt220 x/xterm x/xterm-256color x/xterm-color x/xterm-direct"
-  for entry in $entries; do
-    mkdir -p "share/terminfo/${entry%%/*}"
-    cp "$full/$entry" "share/terminfo/$entry"
-  done
-  rm -rf "$full"
+  # The terminfo database: the entries a shell, a remote machine or a
+  # program may ask for (the whole is 8 MB), and sqterm's own, compiled by
+  # the tic built here (it runs where it was built: on the phone, and in a
+  # host test). An entry's other names become symbolic links.
+  local entries=ansi,dumb,linux,screen,screen-256color,tmux,tmux-256color
+  entries=$entries,vt100,vt102,vt220,xterm,xterm-256color,xterm-color,xterm-direct
+  mkdir -p share/terminfo
+  ./bin/tic -x -e "$entries" -o share/terminfo "$src/misc/terminfo.src"
   ./bin/tic -x -o share/terminfo "$ROOT/terminfo/sqterm.ti"
-  [ -f share/terminfo/s/sqterm ] || { echo "tic did not write sqterm's entry" >&2; return 1; }
+  local entry
+  for entry in a/ansi d/dumb x/xterm-256color s/sqterm; do
+    [ -f "share/terminfo/$entry" ] || { echo "tic did not write $entry" >&2; return 1; }
+  done
   # Its licence travels with it.
   mkdir -p share/licenses/ncurses
   cp "$src/COPYING" share/licenses/ncurses/COPYING

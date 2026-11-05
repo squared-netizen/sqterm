@@ -34,7 +34,15 @@ download is recorded there and later ones must match it.
 
 `bash packages/build.sh --host-test` builds the same recipes for the machine
 it runs on, into `build/packages/host/` (nothing goes into the APK): a check of
-a recipe where there is no NDK.
+a recipe where there is no NDK. `SQ_HOST_PREFIX=<dir>` builds them for where
+they will be unpacked, if that is elsewhere (sqterm's host test harness).
+
+**No hard links.** Android refuses them in an app's files, Termux's home
+included (the first `make packages` on the phone, 2026-11-04: ncurses' tic,
+"cannot link l/lpr to p/printer"). A recipe makes symbolic links instead:
+ncurses is configured `--enable-symlinks`, zsh installs with `LN=cp`. A
+host test can be made to refuse them the same way, with a preloaded
+`link`/`linkat` that fail.
 
 ## What a recipe is
 

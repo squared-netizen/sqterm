@@ -64,7 +64,9 @@ recipe_build() {
     sed -i "s#[[:space:]]*Completion/$system/\*/\*##g" Src/Zle/complete.mdd
   done
   make -j"$JOBS"
-  make install.bin install.modules install.fns DESTDIR="$dest"
+  # LN=cp: the install links zsh to zsh-<version>, and Android refuses a
+  # hard link in an app's files; recipe_after makes it a symbolic one.
+  make install.bin install.modules install.fns DESTDIR="$dest" LN=cp
 }
 
 recipe_after() {

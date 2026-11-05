@@ -77,7 +77,8 @@ need clang clang
 # for API $SQ_API (as mk/squared_generated.mk builds the app). Executables
 # carry DT_HASH for Android 5 and 16 KB pages for the devices that have them.
 if [ "$HOST_TEST" = 1 ]; then
-  SQ_PREFIX=$WORK/host/usr
+  # Where it will be unpacked, if not here (sqterm's host harness: its files).
+  SQ_PREFIX=${SQ_HOST_PREFIX:-$WORK/host/usr}
   OUT=$WORK/host/out
   WORK=$WORK/host/work
   export CC=${CC:-cc} AR=${AR:-ar} RANLIB=${RANLIB:-ranlib} STRIP=${STRIP:-strip}
