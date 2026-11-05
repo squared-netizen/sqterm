@@ -25,9 +25,12 @@ Where it stands (Sprint 12 of the squared plan):
   tapped, it opens sqterm; Exit ends the shell and closes sqterm; Acquire
   wakelock keeps it running with the screen off. A swipe from the recent
   apps leaves the shell running.
-- Next: pinch zoom (12.6b), then 12.5 the prefix and `pkg` (zsh, the clang
-  stack, neovim, bundled in the APK and installed from it), 12.7 Android
-  from the shell.
+- 12.6b, pinch zoom, as Termux does: two fingers scale the font, from 50%
+  to 300% in steps of 5, and the grid follows; the size is kept for the next
+  launch. (Every squared app zooms its whole UI with a pinch; the terminal
+  takes the pinch for its font instead.)
+- Next: 12.5 the prefix and `pkg` (zsh, the clang stack, neovim, bundled in
+  the APK and installed from it), 12.7 Android from the shell.
 
 ## Build and install
 

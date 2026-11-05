@@ -55,6 +55,16 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
   `term.input` in pieces of 1 KB as the rings take them, a frame at a time
   (the paste's buffer, about twice its size, is freed when it is sent).
   A tap elsewhere, or a key, puts the selection away.
+- **Pinch zoom** (12.6b, in TerminalView): squared's Stage offers a
+  two-finger pinch to the widget under it before it zooms the UI, and the
+  terminal takes it (`TerminalView::pinch`): the font's size, in percent of
+  20 units, is the size at the pinch's start times its scale, to a step of 5
+  from 50 to 300. Each step makes the glyphs again at the new pixel size
+  (the atlas cleared, the texture uploaded whole) and sends the new grid as
+  `term.size`; between steps nothing happens. The size is the process's (a
+  rotation makes the widget again), read from the app's files
+  (`terminal.font`, the percent and a newline) at the first fit and written
+  as the fingers lift.
 - **Running in the background** (12.6, `main.cpp`):
   `app.keep_running({.title = "sqterm", .text = "1 session"})` once the
   Shell runs, with `BACKGROUND=1` in the Makefile: squared's foreground
@@ -72,5 +82,6 @@ src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its t
 The model: the Terminal (two 80 x 24 grids to start, then the screen's
 size, and a 1 MB scrollback), a 16 KB read buffer, the three snapshot buffers
 (the screen, 12 bytes a cell). The UI: the atlas's 1 MB image and its 1 MB
-texture on the GPU, FreeType's faces (about 100 KB each), the fonts' mapped
+texture on the GPU (the same at every font size: bigger glyphs fill it
+sooner), FreeType's faces (about 100 KB each), the fonts' mapped
 pages (clean, only what is read).

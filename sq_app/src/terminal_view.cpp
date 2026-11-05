@@ -20,6 +20,14 @@
 // and the Shell makes its text (do term.copy), which comes back as the
 // snapshot term.copied for the clipboard. A paste is the clipboard's text as
 // sq::term::paste_text makes it, sent in pieces the Telegraph takes.
+//
+// A pinch (12.6b) is the terminal's: squared offers it to the widget under
+// the fingers before it zooms the UI, and this one takes it to scale the
+// font, from 50% to 300% in steps of 5, the glyphs made again and the grid
+// sent again at each step. The size is kept in the app's files
+// (`terminal.font`), written as the fingers lift.
+
+#include <stdio.h>
 
 #include "sqterm.hpp"
 
@@ -30,6 +38,44 @@ namespace {
 /// The glyphs' height, in logical units (720 across the shorter side): about
 /// 60 columns on a phone held upright.
 constexpr float font_units = 20.0F;
+
+/// The font's size in percent of that: what a pinch makes it, from the least
+/// to the most, in steps; kept in the app's private files.
+constexpr int least_font = 50;
+constexpr int most_font = 300;
+constexpr int font_step = 5;
+constexpr std::string_view font_file = "terminal.font";
+/// The process's (the widget is made again on each rotation): 0 until read.
+int font_percent = 0;
+
+[[nodiscard]] int to_font_step(float percent) noexcept {
+    const auto steps = std::lround(percent / static_cast<float>(font_step));
+    return std::clamp(static_cast<int>(steps) * font_step, least_font, most_font);
+}
+
+/// The kept size, or 100 when there is none (the first launch).
+[[nodiscard]] int read_font(sq::files::FileSystem& files) noexcept {
+    const sq::files::FileReadResult read = files.read(sq::files::FileType::Local, font_file);
+    if (!read) {
+        return 100;
+    }
+    const auto* text = reinterpret_cast<const char*>(read.bytes.data());
+    int percent = 0;
+    const auto parsed = std::from_chars(text, text + read.bytes.size(), percent);
+    return parsed.ec == std::errc{} ? to_font_step(static_cast<float>(percent)) : 100;
+}
+
+void keep_font(sq::files::FileSystem& files, int percent) noexcept {
+    std::array<char, 8> text{};
+    const auto written = std::to_chars(text.data(), text.data() + text.size() - 1, percent);
+    *written.ptr = '\n';
+    const auto size = static_cast<std::size_t>(written.ptr + 1 - text.data());
+    if (const sq::files::FileError error = files.write_atomically(
+            sq::files::FileType::Local, font_file, std::as_bytes(std::span(text.data(), size)))) {
+        std::fprintf(stderr, "sqterm: the font size could not be kept: %s\n",
+                     error.message.c_str());
+    }
+}
 
 /// A press held this long without moving selects (Android's long press).
 constexpr double long_press_seconds = 0.45;
@@ -161,8 +207,12 @@ void TerminalView::fit() noexcept {
     if (scale <= 0.0F || files == nullptr) {
         return;
     }
+    if (font_percent == 0) {
+        font_percent = read_font(*files);
+    }
     if (scale != scale_) {
-        const auto pixels = static_cast<std::uint16_t>(std::lround(font_units * scale));
+        const float units = font_units * static_cast<float>(font_percent) / 100.0F;
+        const auto pixels = static_cast<std::uint16_t>(std::lround(units * scale));
         if (!glyphs_.prepare(*files, pixels)) {
             return;
         }
@@ -503,6 +553,29 @@ bool TerminalView::pointer_event(const sq::gui::PointerEvent& event) {
                 clear_selection();  // a tap anywhere else puts it away
             }
             return true;
+        }
+    }
+    return true;
+}
+
+bool TerminalView::pinch(const sq::gui::PinchEvent& event) {
+    using sq::gui::PinchPhase;
+    if (font_percent == 0) {
+        return false;  // not fitted yet: the UI's zoom, as anywhere
+    }
+    if (event.phase == PinchPhase::begin) {
+        pinch_start_ = font_percent;
+        return true;
+    }
+    const int percent = to_font_step(static_cast<float>(pinch_start_) * event.scale);
+    if (percent != font_percent) {
+        font_percent = percent;
+        scale_ = 0.0F;  // made again at the next frame, at the new size
+        fit();
+    }
+    if (event.phase == PinchPhase::end && font_percent != pinch_start_) {
+        if (sq::files::FileSystem* files = stage_.files()) {
+            keep_font(*files, font_percent);  // once a pinch, as the fingers lift
         }
     }
     return true;

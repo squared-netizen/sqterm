@@ -162,6 +162,8 @@ public:
                float stage_y) const override;
 
     bool pointer_event(const sq::gui::PointerEvent& event) override;
+    /// A pinch scales the font, not the UI (12.6b), as Termux's does.
+    bool pinch(const sq::gui::PinchEvent& event) override;
     bool key_down(sq::app::Key key, sq::app::KeyModifiers modifiers) override;
     bool text_input(std::string_view text) override;
     bool key_text(std::string_view text, sq::app::KeyModifiers modifiers) override;
@@ -230,7 +232,8 @@ private:
     bool word_held_ = false;   ///< a long press's word, kept whole while the finger is on it
     bool bar_shown_ = false;   ///< the bar is shown
     bool paste_only_ = false;  ///< with Paste alone
-    float scale_ = 0.0F;       ///< pixels to a logical unit
+    int pinch_start_ = 100;    ///< the font's size, in percent, as a pinch began
+    float scale_ = 0.0F;       ///< pixels to a logical unit, as the glyphs were made
     float cell_w_ = 0.0F;      ///< a cell, in logical units
     float cell_h_ = 0.0F;
     std::uint16_t columns_ = 0;  ///< the grid asked of the Shell
