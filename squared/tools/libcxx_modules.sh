@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/libcxx_modules.sh: where libc++'s own module sources are
 # (share/libc++/v1: std.cppm and std/*.inc) for the libc++ a compiler and its
-# flags compile against. One folder printed; tools/std_bmi.sh builds std from
+# flags compile against. One folder printed; sqmake builds std from
 # it, tools/docs.sh reads its list of headers.
 #
 #   libcxx_modules.sh <compiler> <flags>...
@@ -9,7 +9,7 @@
 # The first that has them ("One C++23 toolchain", 2026-11-20: no pinned
 # copy, so one std module per toolchain):
 #
-#   $SQ_STD_CPPM's folder          named outright (build/toolchain.sh env)
+#   $SQ_STD_CPPM's folder          named outright
 #   <prefix>/share/libc++/v1       where the headers are <prefix>/include/c++/v1
 #                                  (sqterm's runtimes package, apt.llvm.org,
 #                                  Termux), or <prefix>/sysroot/usr/include/c++/v1

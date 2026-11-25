@@ -7,7 +7,7 @@ internal: for that, see [../developer/README.md](../developer/README.md).
 - [Imports and file layout](include-layout.md) &mdash; `import squared;`, the modules, and where each type is written
 - [Building](building.md) &mdash; g++ and make, on desktop Linux and Termux
 - [Tools](tools.md) &mdash; the scripts in `squared/tools/`, and the workspace wrappers that run them
-- [API reference](../reference/README.md) &mdash; every public type and function with its comment, made from the module interfaces by `make docs`
+- [API reference](../reference/README.md) &mdash; every public type and function with its comment, made from the module interfaces by `sqmake docs`
 
 ## Modules
 
@@ -15,6 +15,7 @@ internal: for that, see [../developer/README.md](../developer/README.md).
 - [assets](assets.md) &mdash; typed asset cache with dependency tracking
 - [console](console.md) &mdash; the Console, compiled in with `CONSOLE=app`: commands and the built-ins, input, history, scrollback, crash reports, and drawing it
 - [data](data.md) &mdash; strict RFC 8259 JSON parsing and writing
+- [dialogs](dialogs.md) &mdash; dialogs any app shows over its screen: the file dialog (open, save, a folder), a modal pane (`import sq.dialogs;`)
 - [dev](dev.md) &mdash; development aids: a loopback log sink and its listener, crash reporter and frame-allocation counter (not in release builds)
 - [files](files.md) &mdash; virtual filesystem and libGDX-style file handles; files compiled into the program (`EmbeddedFileSystem`, `tools/embed_files.sh`)
 - [font](font.md) &mdash; font faces read and rendered at run time (FreeType): cell metrics, glyphs as 8-bit coverage, bold and italic made; fallback faces; a glyph atlas for one texture
