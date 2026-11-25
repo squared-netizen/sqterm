@@ -129,15 +129,18 @@ jobs:
 
       # squared's build/toolchain.sh (pkg's build, and squared's) does its
       # text work with sqedit: built for this machine first, at the tag its
-      # recipe pins.
+      # recipe pins, by sqmake (bootstrapped from its recipe's tag: no make).
       - name: sqedit for this machine
         if: steps.plan.outputs.missing != ''
         run: |
           set -euo pipefail
-          tag=$(bash -c '. packages/sqedit/recipe.sh; echo $tag')
-          git clone --quiet --depth 1 --branch "$tag" https://github.com/squared-netizen/sqedit "$RUNNER_TEMP/sqedit"
-          make -C "$RUNNER_TEMP/sqedit" -j4 CXX=/usr/lib/llvm-23/bin/clang++ CC=/usr/lib/llvm-23/bin/clang \
-            AR=/usr/lib/llvm-23/bin/llvm-ar build/sqedit
+          llvm=/usr/lib/llvm-23/bin
+          for name in sqmake sqedit; do
+            tag=$(bash -c ". packages/$name/recipe.sh; echo v\$version")
+            git clone --quiet --depth 1 --branch "$tag" "https://github.com/squared-netizen/$name" "$RUNNER_TEMP/$name"
+          done
+          (cd "$RUNNER_TEMP/sqmake" && CXX=$llvm/clang++ CC=$llvm/clang AR=$llvm/llvm-ar sh tools/bootstrap.sh)
+          CXX=$llvm/clang++ CC=$llvm/clang "$RUNNER_TEMP/sqmake/build/sqmake" -C "$RUNNER_TEMP/sqedit" -j4 build/sqedit
           echo "$RUNNER_TEMP/sqedit/build" >> "$GITHUB_PATH"
 
       - name: Compiler cache (kept even when a run fails)

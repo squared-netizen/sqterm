@@ -15,8 +15,9 @@
 #
 # Built with sqmake, as sqconsole is: sqgui's build.lua, against the squared
 # sqterm carries (SQUARED_REV) and the SDK's toolchain (SQ_SYSROOT names the
-# sysroot). sqmake 0.10.0 is built first for the build machine, from its tag's
-# archive (an `extra` file); sqgui from its tag's.
+# sysroot). sqmake 0.12.0 is bootstrapped first for the build machine, from
+# its tag's archive (an `extra` file: packages/sqmake.sh); sqgui from its
+# tag's.
 
 version=0.4.0
 license=MIT
@@ -26,11 +27,11 @@ sha256=ab1ac63aeb23f12812b72e084790dd9994d272ab28fe3591ea18cca739a41c55
 top=sqgui-$version
 # "SUB URL SHA256": sqmake, for the build machine.
 extra="
-sqmake https://github.com/squared-netizen/sqmake/archive/refs/tags/v0.10.0.tar.gz 9c18199c19bd47612034bacf76c37e0b22ac6905f1c27fa2674e5fe03c8f81af
+sqmake https://github.com/squared-netizen/sqmake/archive/refs/tags/v0.12.0.tar.gz 2d9f540d41cff5fd320d6e039126fd979502e0026eac99d42414cfc19ae336ff
 "
 depends="sysroot runtimes"
 # squared changes only by tools/vendor_framework.sh, which writes SQUARED_REV.
-inputs="SQUARED_REV squared/build/squared.lua squared/build/toolchain.lua"
+inputs="SQUARED_REV squared/build/squared.lua squared/build/toolchain.lua packages/sqmake.sh"
 bundled=yes
 keep="bin/sqgui-gen bin/sqgui share/licenses/sqgui"
 
@@ -40,19 +41,15 @@ recipe_build() {
   local here=${dest%/dest}
   local sysroot=$here/../sysroot/dest$SQ_PREFIX/share/sysroot rt=$here/../runtimes/dest$SQ_PREFIX
   [ -d "$sysroot/usr/include" ] || { echo "no sysroot at $sysroot (build sysroot first)" >&2; return 1; }
-  # 1. sqmake, for this machine: its own Makefile, with none of the Android
-  #    flags build.sh exports.
-  local sqmake_src=$here/sqmake
-  mkdir -p "$sqmake_src"
-  tar -xzf "$extra_sqmake" -C "$sqmake_src" --strip-components=1
-  env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u CC -u CXX make -C "$sqmake_src" -j"$JOBS" BUILD="$here/host" \
-    CXX="$bin/clang++" CC="$bin/clang" AR="$bin/llvm-ar" "$here/host/sqmake"
+  # 1. sqmake, for this machine (packages/sqmake.sh: its tools/bootstrap.sh).
+  . "$ROOT/packages/sqmake.sh"
+  sq_host_sqmake "$extra_sqmake"
   # 2. sqgui-gen, for Android: sqgui's build.lua in the unpacked source
   #    (sqmake writes its build/ there), against sqterm's squared.
   ( cd "$src" &&
     env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u CXX -u CC \
       SQUARED="$ROOT/squared" SQ_LLVM_BIN="$bin" SQ_SYSROOT="$sysroot" SQ_RUNTIMES="$rt" SQ_API="$SQ_API" \
-      "$here/host/sqmake" -j"$JOBS" )
+      "$SQ_HOST_SQMAKE" -j"$JOBS" )
   mkdir -p "$dest$SQ_PREFIX/bin"
   local program
   for program in sqgui-gen sqgui; do

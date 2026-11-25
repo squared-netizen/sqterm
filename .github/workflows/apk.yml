@@ -91,12 +91,16 @@ jobs:
       - name: sqedit, apkpack and sqmake for this machine, at their recipes' tags
         run: |
           set -euo pipefail
-          for name in sqedit apkpack sqmake; do
-            tag=$(bash -c ". packages/$name/recipe.sh; echo \$tag")
+          for name in sqmake sqedit apkpack; do
+            tag=$(bash -c ". packages/$name/recipe.sh; echo v\$version")
             git clone --quiet --depth 1 --branch "$tag" "https://github.com/squared-netizen/$name" "$RUNNER_TEMP/$name"
-            make -C "$RUNNER_TEMP/$name" -j4 CXX=clang++ CC=clang AR=llvm-ar "build/$name"
-            echo "$RUNNER_TEMP/$name/build" >> "$GITHUB_PATH"
           done
+          # sqmake from a compiler and a shell (no make), then it builds the others.
+          (cd "$RUNNER_TEMP/sqmake" && CXX=clang++ CC=clang AR=llvm-ar sh tools/bootstrap.sh)
+          for name in sqedit apkpack; do
+            CXX=clang++ CC=clang "$RUNNER_TEMP/sqmake/build/sqmake" -C "$RUNNER_TEMP/$name" -j4 "build/$name"
+          done
+          for name in sqmake sqedit apkpack; do echo "$RUNNER_TEMP/$name/build" >> "$GITHUB_PATH"; done
 
       - name: No NDK, no Android SDK tools
         run: |

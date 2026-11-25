@@ -1,4 +1,4 @@
-# square 0.5.1: the squared SDK's workspace manager, MIT. The one tool that
+# square 0.5.2: the squared SDK's workspace manager, MIT. The one tool that
 # knows what a workspace is: square info, where, owner, verify, roles, find,
 # pack, explode, resources, show, and square call (the SDK's tool protocol),
 # on the workspaces sqpg makes (pkg install squared-pg) and the cartridges it
@@ -9,54 +9,37 @@
 #
 # C++23 modules (`import std`), so built as sqedit is: by a clang 23 for the
 # build machine (LLVM_BIN), against the sysroot and runtimes packages, with
-# square's own Makefile. sqdrive (how it packs and explodes) and the sqcart
-# it builds on (with squared's sq.data and yyjson) are vendored in its
-# repository. A git source: the tag's commit is in
-# sources.lock.
+# square's own build.lua and sqmake (packages/sqmake.sh). sqdrive (how it
+# packs and explodes) and the sqcart it builds on (with squared's sq.data
+# and yyjson) are vendored in its repository. GitHub's archive of its tag,
+# checked by its sha256 (an archive, not a clone: a git source takes no
+# `extra`).
 
-version=0.5.1
+version=0.5.2
 license=MIT
-git=https://github.com/squared-netizen/square
-tag=v$version
-file=
-top=
+file=square-$version.tar.gz
+url=https://github.com/squared-netizen/square/archive/refs/tags/v$version.tar.gz
+sha256=0015f90f6244232d956b90fc249a9fa1f73c8183e9e0edb3a8e3b86dedc1cd93
+top=square-$version
+# "SUB URL SHA256": sqmake, for the build machine (its tools/bootstrap.sh).
+extra="
+sqmake https://github.com/squared-netizen/sqmake/archive/refs/tags/v0.12.0.tar.gz 2d9f540d41cff5fd320d6e039126fd979502e0026eac99d42414cfc19ae336ff
+"
 depends="sysroot runtimes"
+inputs=packages/sqmake.sh
 bundled=no
 keep="bin/square share/licenses/square"
 
 recipe_build() {
-  local bin=${LLVM_BIN:-/usr/lib/llvm-23/bin}
-  [ -x "$bin/clang++" ] || { echo "no clang 23 at $bin (set LLVM_BIN)" >&2; return 1; }
-  local triple=aarch64-unknown-linux-android$SQ_API
+  . "$ROOT/packages/sqmake.sh"
   local here=${dest%/dest}
-  local sysroot=$here/../sysroot/dest$SQ_PREFIX/share/sysroot rt=$here/../runtimes/dest$SQ_PREFIX
-  [ -d "$sysroot/usr/include" ] || { echo "no sysroot at $sysroot (build sysroot first)" >&2; return 1; }
-  local std
-  std=$(ls "$rt"/share/libc++/v*/std.cppm 2>/dev/null | head -n 1)
-  [ -f "$std" ] || { echo "no std.cppm in $rt (build runtimes first)" >&2; return 1; }
-  # The resource directory and the two compiler scripts, as sqdrive's
-  # recipe makes them (its comments say why each flag is there).
-  local rd=$here/resource-dir out=$here/obj tools=$here/tools
-  rm -rf "$rd" "$out" && mkdir -p "$rd" "$out" "$tools"
-  cp -R "$("$bin/clang" -print-resource-dir)/include" "$rd/"
-  cp -R "$rt"/lib/clang/*/lib "$rd/"
-  local flags="--target=$triple --sysroot=$sysroot -resource-dir=$rd -rtlib=compiler-rt -unwindlib=libunwind -D__BIONIC_CTYPE_INLINE=inline"
-  printf '#!/bin/sh\nexec "%s" %s "$@"\n' "$bin/clang" "$flags" > "$tools/clang"
-  printf '#!/bin/sh\nexec "%s" %s -nostdinc++ -isystem "%s" -isystem "%s" "$@"\n' "$bin/clang++" "$flags" \
-    "$rt/include/$triple/c++/v1" "$rt/include/c++/v1" > "$tools/clang++"
-  chmod +x "$tools/clang" "$tools/clang++"
-  # BUILD outside the clone (sqcart's build goes in BUILD/sqcart): the
-  # clone is read in place.
-  env -u CFLAGS -u CXXFLAGS -u CPPFLAGS make -j"$JOBS" BUILD="$out" CXX="$tools/clang++" CC="$tools/clang" \
-    AR="$bin/llvm-ar" OPT=-O2 STD_MANIFEST= STD_CPPM="$std" \
-    LDFLAGS="-stdlib=libc++ -static-libstdc++ -fuse-ld=lld -L$rt/lib/$triple" \
-    "$out/square"
+  sq_host_sqmake "$extra_sqmake"
+  sq_android_tools
+  # The source is only read: everything is built in $here/obj.
+  sq_android_build "$src" "$here/obj" square
   mkdir -p "$dest$SQ_PREFIX/bin"
-  cp "$out/square" "$dest$SQ_PREFIX/bin/square"
-  # What it is: an arm64 Android program that needs no C++ library.
-  "$bin/llvm-readelf" -h "$dest$SQ_PREFIX/bin/square" | "$SQEDIT" match -q -F AArch64
-  "$bin/llvm-readelf" -l "$dest$SQ_PREFIX/bin/square" | "$SQEDIT" match -q -F /system/bin/linker64
-  ! "$bin/llvm-readelf" -d "$dest$SQ_PREFIX/bin/square" | "$SQEDIT" match -q '"NEEDED" (!"c++" .)* "c++"'
+  cp "$here/obj/square" "$dest$SQ_PREFIX/bin/square"
+  sq_android_program "$dest$SQ_PREFIX/bin/square"
 }
 
 recipe_after() {
