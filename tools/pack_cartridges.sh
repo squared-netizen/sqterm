@@ -4,7 +4,7 @@
 # spec's Appendix B.2: kind "package"), in build/packages/cartridges/
 # NAME-VERSION.sq. Offline. A package already packed at its key is skipped.
 #
-# The packer, tools/cartridge (sqterm-pack), is built first, for this
+# The packer, tools/cartridge (sqterm-pack), is built first by sqmake, for this
 # machine, from third_party/sqcart: clang 23 and libc++ with `import std`
 # (LLVM_BIN, default /usr/lib/llvm-23/bin; in sqterm, pkg install llvm).
 #
@@ -22,7 +22,12 @@ say() { printf '== %s\n' "$*"; }
 fail() { printf 'pack_cartridges: %s\n' "$*" >&2; exit 1; }
 
 [ -x "$LLVM_BIN/clang++" ] || fail "no clang 23 at $LLVM_BIN (set LLVM_BIN)"
-make -s -C "$ROOT/tools/cartridge" CXX="$LLVM_BIN/clang++" BUILD="$TOOL" ${PACK_LDFLAGS:+LDFLAGS="$PACK_LDFLAGS"}
+SQMAKE=${SQMAKE:-sqmake}
+command -v "$SQMAKE" >/dev/null || fail "needs sqmake, on PATH or as SQMAKE (in sqterm, pkg install sqmake)"
+# Built by tools/cartridge/build.lua, from the root (quiet unless it fails).
+mkdir -p "$WORK"
+CXX="$LLVM_BIN/clang++" CC="$LLVM_BIN/clang" SQ_OUT="$TOOL" "$SQMAKE" -C "$ROOT" -f tools/cartridge/build.lua \
+  >"$WORK/cartridge-tool.log" 2>&1 || { cat "$WORK/cartridge-tool.log" >&2; fail "sqterm-pack did not build"; }
 mkdir -p "$OUT"
 
 wanted=" $* "

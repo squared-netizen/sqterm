@@ -885,14 +885,24 @@ private:
 
 struct PackOptions {
     /// Leave out records in SQ-INF/entries.json for files that are not
-    /// there (left by a rename outside the tools), rather than refuse (§6.1).
+    /// there (left by a rename outside the tools), rather than refuse (§6).
     bool drop_orphans = false;
+    /// Top-level folders named with a dot to pack all the same, each by its
+    /// name (".git", for a backup). Every other one is left out (§6). In a
+    /// kept folder, a file the file system marks executable is flagged x.
+    std::vector<std::string> keep;
+    /// Paths in the folder, relative to it, left out with everything under
+    /// them: what a consumer knows is made, not kept ("build", a workspace's
+    /// output). Never in SQ-INF/, never with a "..".
+    std::vector<std::string> leave_out;
 };
 
 /// Pack an exploded cartridge, `folder`, into a new cartridge, `out`, as one
-/// commit (§6.1): its regular files, with the metadata SQ-INF/entries.json
+/// commit (§6): its regular files, with the metadata SQ-INF/entries.json
 /// gives them; never a symbolic link (refused, not followed), never the
-/// top-level .squared/ or .git/, never entries.json itself.
+/// top-level folder whose name begins with a dot (.git/, a tool's working
+/// state) unless pack_options.keep names it, never what pack_options.leave_out
+/// names, never entries.json itself.
 Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::path& out, WriteOptions options = {},
                     PackOptions pack_options = {}, std::optional<SigningKey> key = std::nullopt);
 
@@ -1474,45 +1484,16 @@ std::optional<std::vector<std::byte>> read_file(const std::filesystem::path& p) 
 
 /// One record of SQ-INF/entries.json as PutOptions.
 Result<PutOptions> exploded_options(const data::JsonValue& v, const std::string& path) {
+    auto e = exploded_record(v, path);
+    if (!e) return std::unexpected(e.error());
     PutOptions o;
-    if (v.object_if() == nullptr) return fail(Code::json, "its SQ-INF/entries.json record is not an object", path);
-    for (const auto& [name, value] : *v.object_if()) {
-        const std::string* s = value.string_if();
-        const auto number = [&]() -> std::optional<std::int64_t> {
-            if (const auto* i = value.signed_integer_if()) return *i;
-            if (const auto* u = value.unsigned_integer_if()) return static_cast<std::int64_t>(*u);
-            return std::nullopt;
-        };
-        if (name == "title" && s) {
-            o.title = *s;
-        } else if (name == "author" && s) {
-            o.author = *s;
-        } else if (name == "media_type" && s) {
-            o.media_type = *s;
-        } else if (name == "created" && number()) {
-            o.created = *number();
-        } else if (name == "updated" && number()) {
-            o.updated = *number();
-        } else if (name == "attributes" && value.object_if()) {
-            auto text = data::write_json(value, {.canonical = true});
-            if (!text) return fail(Code::json, text.error.message, path);
-            o.attributes = std::move(text.text);
-        } else if (name == "flags" && s) {
-            o.flags = 0;
-            for (const char c : *s) {
-                switch (c) {
-                    case 'r': o.flags |= flag::r; break;
-                    case 'w': o.flags |= flag::w; break;
-                    case 'x': o.flags |= flag::x; break;
-                    case 'm': o.flags |= flag::mappable; break;
-                    case 'd': o.flags |= flag::dictionary; break;
-                    default: return fail(Code::json, std::format("the flag '{}' in SQ-INF/entries.json", c), path);
-                }
-            }
-        } else {
-            return fail(Code::json, std::format("SQ-INF/entries.json: \"{}\" is not a member, or not of its type", name), path);
-        }
-    }
+    o.title = std::move(e->title);
+    o.author = std::move(e->author);
+    o.media_type = std::move(e->media_type);
+    o.attributes = std::move(e->attributes);
+    o.created = e->created;
+    o.updated = e->updated;
+    o.flags = e->flags;
     if (o.flags & flag::mappable) o.store = Store::stored;
     return o;
 }
@@ -1543,8 +1524,31 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
             metadata.emplace(nfc(path), std::move(*o));
         }
     }
-    // The files.
+    // The kept dot folders: each a name at the top, and there.
+    for (const std::string& k : pack_options.keep) {
+        if (!k.starts_with(".") || k == "." || k == ".." || k.find('/') != std::string::npos)
+            return fail(Code::path, "keep: a top-level folder named with a dot (.git), not " + k);
+        if (!fs::is_directory(fs::symlink_status(folder / k, ec))) return fail(Code::path, "keep: no folder " + k + " at the top");
+    }
+    // What is left out: relative paths in the folder, and not SQ-INF.
+    for (const std::string& l : pack_options.leave_out) {
+        const fs::path lp(l);
+        if (l.empty() || lp.is_absolute() || std::ranges::any_of(lp, [](const fs::path& part) { return part == ".."; }) ||
+            l == "SQ-INF" || l.starts_with("SQ-INF/"))
+            return fail(Code::path, "leave_out: a path in the folder, outside SQ-INF, not " + l);
+    }
+    auto left_out = [&](std::string_view name) {
+        return std::ranges::any_of(pack_options.leave_out, [&](const std::string& l) {
+            const std::string_view p = std::string_view(l).ends_with('/') ? std::string_view(l).substr(0, l.size() - 1) : std::string_view(l);
+            return name == p || (name.starts_with(p) && name.size() > p.size() && name[p.size()] == '/');
+        });
+    };
+    auto kept = [&](std::string_view name) {
+        return std::ranges::any_of(pack_options.keep, [&](const std::string& k) { return name == k || name.starts_with(k + "/"); });
+    };
+    // The files, and which a kept folder marks executable.
     std::vector<std::pair<std::string, fs::path>> files;
+    std::set<std::string, std::less<>> executable;
     fs::recursive_directory_iterator it(folder, fs::directory_options::none, ec), end;
     if (ec) return fail(Code::io, std::format("cannot read {}: {}", folder.string(), ec.message()));
     for (; it != end; it.increment(ec)) {
@@ -1552,12 +1556,18 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
         const fs::path rel = it->path().lexically_relative(folder);
         std::string name = rel.generic_string();
         // Names as the file system gives them; macOS decomposes them (NFD),
-        // and every path is NFC (§4.1, §6.1).
+        // and every path is NFC (§4.1, §6).
         if (!valid_utf8(name)) return fail(Code::path, "a name that is not UTF-8", name);
         name = nfc(name);
         const auto status = it->symlink_status(ec);
-        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6.1)", name);
-        if (it.depth() == 0 && fs::is_directory(status) && (name == ".squared" || name == ".git")) {
+        if (left_out(name)) {  // before the link check: a left-out link is not looked at
+            if (fs::is_directory(status)) it.disable_recursion_pending();
+            continue;
+        }
+        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6)", name);
+        // A top-level folder named with a dot: a tool's working state
+        // (.git/, and any consumer's), left out unless kept by name (§6).
+        if (it.depth() == 0 && fs::is_directory(status) && name.starts_with(".") && !kept(name)) {
             it.disable_recursion_pending();
             continue;
         }
@@ -1566,24 +1576,26 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
             return fail(Code::path, "two names in the folder that are one in NFC", name);
         }
         files.emplace_back(name, it->path());
+        if (kept(name) && (status.permissions() & fs::perms::owner_exec) != fs::perms::none) executable.insert(name);
     }
     std::ranges::sort(files);
     std::set<std::string, std::less<>> present;
     for (const auto& [name, p] : files) present.insert(name);
     for (const auto& [path, o] : metadata) {
         if (!present.contains(path) && !pack_options.drop_orphans) {
-            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6.1)", path);
+            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6)", path);
         }
     }
     auto w = Writer::create(out, options);
     if (!w) return std::unexpected(w.error());
     if (key) w->sign_with(std::move(*key));
     for (const auto& [name, p] : files) {
-        auto bytes = read_file(p);
-        if (!bytes) return fail(Code::io, "cannot read it", name);
         PutOptions o;
         if (auto m = metadata.find(name); m != metadata.end()) o = m->second;
-        if (auto r = w->put(name, *bytes, o); !r) return std::unexpected(r.error());
+        else if (executable.contains(name)) o.flags = flag::r | flag::x;
+        // Read at the commit, 1 MiB at a time: a file is never held whole
+        // (chunked past 64 MiB), so a large asset packs on a phone too.
+        if (auto r = w->put_file(name, p, o); !r) return std::unexpected(r.error());
     }
     return w->commit();
 }

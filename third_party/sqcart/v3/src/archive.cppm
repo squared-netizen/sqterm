@@ -252,6 +252,38 @@ struct Chunk {
     return h.finish();
 }
 
+/// A manifest's text read as §7 asks: I-JSON, format squared-cartridge,
+/// format_version 3, an id, a version and a kind. What a reader needs of
+/// it; the rest is its consumers'. For a packed cartridge and a folder.
+[[nodiscard]] Result<Manifest> parse_manifest(std::string_view text, std::uint32_t max_json_depth = 64) {
+    constexpr std::string_view at = "SQ-INF/manifest.json";
+    auto json = parse_ijson(text, max_json_depth);
+    if (!json) {
+        auto err = json.error();
+        err.entry = std::string(at);
+        return std::unexpected(err);
+    }
+    if (json->object_if() == nullptr) return fail(Code::malformed, "the manifest is not a JSON object", std::string(at));
+    const data::JsonValue* format_version = json->find("format_version");
+    const bool three = format_version != nullptr &&
+                       ((format_version->unsigned_integer_if() && *format_version->unsigned_integer_if() == 3) ||
+                        (format_version->signed_integer_if() && *format_version->signed_integer_if() == 3));
+    if (json_string_member(*json, "format") != "squared-cartridge") {
+        return fail(Code::malformed, "the manifest's format is not squared-cartridge", std::string(at));
+    }
+    if (!three) return fail(Code::unsupported, "the manifest's format_version is not 3", std::string(at));
+    auto id = json_string_member(*json, "id");
+    auto version = json_string_member(*json, "version");
+    auto kind = json_string_member(*json, "kind");
+    if (!id || !version || !kind) return fail(Code::malformed, "the manifest has no id, version or kind", std::string(at));
+    Manifest m{std::move(*id), std::move(*version), std::move(*kind), std::string(text)};
+    if (const data::JsonValue* cs = json->find("case_sensitive")) {
+        if (cs->boolean_if() == nullptr) return fail(Code::malformed, "the manifest's case_sensitive is not true or false", std::string(at));
+        m.case_sensitive = *cs->boolean_if();
+    }
+    return m;
+}
+
 /// Whether a path follows §4.1 (as 2.0 §3.3): relative, '/'-separated, no
 /// '.', '..' or empty segment, no NUL, backslash, ':' or control character,
 /// within `max_bytes`, valid UTF-8. The reason when it does not.
@@ -914,32 +946,9 @@ private:
         }
         auto bytes = read(*e);
         if (!bytes) return std::unexpected(bytes.error());
-        const std::string_view text(reinterpret_cast<const char*>(bytes->data()), bytes->size());
-        auto json = parse_ijson(text, options_.limits.max_json_depth);
-        if (!json) {
-            auto err = json.error();
-            err.entry = std::string(manifest_path);
-            return std::unexpected(err);
-        }
-        // The few members a reader needs; consumers read the rest.
-        if (json->object_if() == nullptr) return fail(Code::malformed, "the manifest is not a JSON object", std::string(manifest_path));
-        const data::JsonValue* format_version = json->find("format_version");
-        const bool three = format_version != nullptr &&
-                           ((format_version->unsigned_integer_if() && *format_version->unsigned_integer_if() == 3) ||
-                            (format_version->signed_integer_if() && *format_version->signed_integer_if() == 3));
-        if (json_string_member(*json, "format") != "squared-cartridge") {
-            return fail(Code::malformed, "the manifest's format is not squared-cartridge", std::string(manifest_path));
-        }
-        if (!three) return fail(Code::unsupported, "the manifest's format_version is not 3", std::string(manifest_path));
-        auto id = json_string_member(*json, "id");
-        auto version = json_string_member(*json, "version");
-        auto kind = json_string_member(*json, "kind");
-        if (!id || !version || !kind) return fail(Code::malformed, "the manifest has no id, version or kind", std::string(manifest_path));
-        manifest_ = Manifest{std::move(*id), std::move(*version), std::move(*kind), std::string(text)};
-        if (const data::JsonValue* cs = json->find("case_sensitive")) {
-            if (cs->boolean_if() == nullptr) return fail(Code::malformed, "the manifest's case_sensitive is not true or false", std::string(manifest_path));
-            manifest_.case_sensitive = *cs->boolean_if();
-        }
+        auto m = parse_manifest(std::string_view(reinterpret_cast<const char*>(bytes->data()), bytes->size()), options_.limits.max_json_depth);
+        if (!m) return std::unexpected(m.error());
+        manifest_ = std::move(*m);
         return {};
     }
 
