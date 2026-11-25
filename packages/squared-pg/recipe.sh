@@ -17,16 +17,16 @@
 # a clang 23 for the build machine (LLVM_BIN) against the sysroot and
 # runtimes packages, with squared-pg's own Makefile.
 
-version=0.1.0-alpha.3
+version=0.1.0-alpha.4
 license=MIT
 file=squared-pg-$version.tar.gz
 url=https://github.com/squared-netizen/squared-pg/archive/refs/tags/v$version.tar.gz
-sha256=183231bc42fcd3cc7572efc7b6b87510cfcabfbd3c224672a89082fd046c0613
+sha256=f5f79efe9a2537b27d5f919700c15b438452f2a5b72ed4d3b2b08f10b46e7dc1
 top=squared-pg-$version
 # "SUB URL SHA256": GitHub's archive of a commit, checked by its sha256.
 extra="
 sqcart  https://github.com/squared-netizen/sqcart/archive/c43983bd6679160b227aeb8210a381ab1000a1d7.tar.gz 386254f3f01232b4736fbc0e23ed4ad4b0657a1726ccabe53463f69f8aa158a8
-squared https://github.com/squared-netizen/squared/archive/d60e46fe817bd5c2e34fe9d207048ac433309d8b.tar.gz bedc985530128f2a016def0c62877cb1198dd3e9e81bb6e6854a98a21f444dda
+squared https://github.com/squared-netizen/squared/archive/9d188e5047363d4bf22684472129c38212a34f23.tar.gz a92a2f5163e8c99f288137c8522bc248a48a0674743a48894958fbbce2753751
 "
 depends="sysroot runtimes"
 bundled=no
