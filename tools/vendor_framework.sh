@@ -81,7 +81,7 @@ sync_tree() {
     fi
     mkdir -p "$(dirname "$to/$f")"
     rm -f "$to/$f"
-    # Not cp -p: a written file is new now, so make rebuilds what uses it.
+    # Not cp -p: a written file is new now, so sqmake rebuilds what uses it.
     cp "$from/$f" "$to/$f"
     if [ -x "$from/$f" ]; then chmod 755 "$to/$f"; else chmod 644 "$to/$f"; fi
   done <"$TMP/new"
@@ -144,10 +144,10 @@ fi
 
 rm -rf "$TMP/x"; mkdir -p "$TMP/x"
 git -C "$PKG_REPO" archive --format=tar "$rev" "$TREE/squared" | tar -x -C "$TMP/x"
-[ -f "$TMP/x/$TREE/squared/build/common.mk" ] || die "package commit $short has no squared/build/common.mk"
+[ -f "$TMP/x/$TREE/squared/build/squared.lua" ] || die "package commit $short has no squared/build/squared.lua"
 
 current=$(read_rev "$here/SQUARED_REV")
-if [ "$current" = "$rev" ] && [ -f "$here/squared/build/common.mk" ] && [ "$FORCE" = 0 ]; then
+if [ "$current" = "$rev" ] && [ -f "$here/squared/build/squared.lua" ] && [ "$FORCE" = 0 ]; then
   echo "  squared/ already at $short"
 else
   echo "  squared/ <- package $short$([ -n "$current" ] && [ "$current" != "$rev" ] && echo " (was ${current:0:7})")"

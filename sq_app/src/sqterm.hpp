@@ -82,12 +82,20 @@ struct DrawerButton {
     void (*tap)(sq::Stage& stage) = nullptr;
 };
 /// What the drawer shows: its title, and the app's buttons after Keyboard.
-/// sqterm's: "sqterm", none. Set in squared_main, before the widget is made.
+/// sqterm's: "sqterm", and Settings. Set in squared_main, before the widget
+/// is made.
 struct Drawer {
     std::string title = "sqterm";
     std::vector<DrawerButton> buttons;
 };
 void set_drawer(Drawer drawer);
+
+/// The app's Settings (settings.cpp): its preferences (`app_id`'s, in its
+/// private files) opened, squared's Settings screen made over them and its
+/// sections applied (the zoom's range, pinch to zoom). In squared_main, once.
+void start_settings(sq::Stage& stage, std::string_view app_id);
+/// The Settings screen shown: a drawer button's tap.
+void show_settings(sq::Stage& stage);
 
 struct Places {
     /// The app's name, as the terminal says it ("[sqterm: unpacking zsh]"):
