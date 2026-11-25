@@ -483,8 +483,14 @@ sq::gui::Rectangle TerminalView::drawer() const noexcept {
 
 sq::gui::Rectangle TerminalView::drawer_button(std::size_t i) const noexcept {
     const sq::gui::Rectangle pane = drawer();
+    if (i == 0) {
+        // Keyboard: at the bottom left, as Termux's drawer has it.
+        return {drawer_margin_units, pane.height - drawer_margin_units - button_height_units,
+                (pane.width - (drawer_margin_units * 3.0F)) * 0.5F, button_height_units};
+    }
+    // The app's buttons (sqIDE's screens), from the top.
     const float step = button_height_units + drawer_margin_units;
-    return {drawer_margin_units, (drawer_margin_units * 4.0F) + (static_cast<float>(i) * step),
+    return {drawer_margin_units, (drawer_margin_units * 4.0F) + (static_cast<float>(i - 1) * step),
             pane.width - (drawer_margin_units * 2.0F), button_height_units};
 }
 
