@@ -10,9 +10,11 @@
 #   bin/sqls            ls with Nerd Font icons and LS_COLORS colours
 #                       (sq_app/cli/sqls.cpp; zshrc aliases ls to it)
 #
-# Built from this repository (no source to download), as pkg is: by the
-# SDK's toolchain (squared/build/toolchain.sh's wrappers), against the
-# sysroot and runtimes packages; yyjson (squared's copy) for the JSON.
+# Built from this repository (no source to download), as pkg is: by clang 23
+# for the build machine, as packages/sqmake.sh's Android compilers make it
+# (libc++ linked in, 16 KB pages), against the sysroot and runtimes
+# packages; yyjson (squared's copy) for the JSON. No build tool: two
+# programs, three sources.
 
 version=3
 license="sqterm's own"
@@ -20,21 +22,16 @@ file=
 top=
 depends="sysroot runtimes"
 inputs="sq_app/cli/sqterm_cli.cpp sq_app/cli/sqls.cpp squared/third_party/yyjson/yyjson.c squared/third_party/yyjson/yyjson.h
-        squared/build/toolchain.sh"
+        packages/sqmake.sh"
 keep="bin/sqterm-api bin/sqterm-launch bin/sqterm-install bin/sqterm-uninstall bin/sqls"
 
 recipe_build() {
   local here=$PWD out=$dest$SQ_PREFIX/bin cxx cc ldflags=
   if [ -n "$SQ_HOST_TRIPLE" ]; then
-    local work=${dest%/dest}/..
-    export SQ_LLVM_BIN=${LLVM_BIN:-/usr/lib/llvm-23/bin} SQ_API
-    export SQ_SYSROOT=$work/sysroot/dest$SQ_PREFIX/share/sysroot SQ_RUNTIMES=$work/runtimes/dest$SQ_PREFIX
-    bash "$ROOT/squared/build/toolchain.sh" wrappers "$here/toolchain"
-    cxx=$here/toolchain/clang++ cc=$here/toolchain/clang
-    local key value
-    while IFS='=' read -r key value; do
-      [ "$key" = SQ_TOOLCHAIN_LDFLAGS ] && ldflags=$value
-    done < <(bash "$ROOT/squared/build/toolchain.sh" env)
+    # The link's flags are in the compilers (packages/sqmake.sh).
+    . "$ROOT/packages/sqmake.sh"
+    sq_android_tools
+    cxx=$SQ_TOOLS/clang++ cc=$SQ_TOOLS/clang
   else
     # sqterm's host harness: this machine's clang and libc++ ($CXX and $CC
     # may carry flags: wrappers, as pkg's recipe makes them).

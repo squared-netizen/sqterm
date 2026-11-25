@@ -28,7 +28,6 @@ on:
       - sq_app/src/unpack.cpp
       - sq_app/src/unpack.hpp
       - sq_app/src/unpack_cartridge.cpp
-      - squared/build/toolchain.sh
       - SQUARED_REV
       - squared/build/squared.lua
       - squared/build/toolchain.lua
@@ -49,7 +48,6 @@ on:
       - sq_app/src/unpack.cpp
       - sq_app/src/unpack.hpp
       - sq_app/src/unpack_cartridge.cpp
-      - squared/build/toolchain.sh
       - SQUARED_REV
       - squared/build/squared.lua
       - squared/build/toolchain.lua
@@ -127,10 +125,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang-23 lld-23 llvm-23 libc++-23-dev libc++abi-23-dev
           /usr/lib/llvm-23/bin/clang --version | head -n 1
 
-      # squared's build/toolchain.sh (pkg's build, and squared's) does its
-      # text work with sqedit: built for this machine first, at the tag its
-      # recipe pins, by sqmake (bootstrapped from its recipe's tag: no make).
-      - name: sqedit for this machine
+      # sqmake and sqedit for this machine, at the tags their recipes pin:
+      # sqmake bootstrapped (no make); it builds sqedit (the recipes' and
+      # build.sh's text work), pkg (packages/pkg/build.lua) and the
+      # cartridges' packer (tools/cartridge/build.lua).
+      - name: sqmake and sqedit for this machine
         if: steps.plan.outputs.missing != ''
         run: |
           set -euo pipefail
@@ -142,6 +141,7 @@ jobs:
           (cd "$RUNNER_TEMP/sqmake" && CXX=$llvm/clang++ CC=$llvm/clang AR=$llvm/llvm-ar sh tools/bootstrap.sh)
           CXX=$llvm/clang++ CC=$llvm/clang "$RUNNER_TEMP/sqmake/build/sqmake" -C "$RUNNER_TEMP/sqedit" -j4 build/sqedit
           echo "$RUNNER_TEMP/sqedit/build" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/sqmake/build" >> "$GITHUB_PATH"
 
       - name: Compiler cache (kept even when a run fails)
         if: steps.plan.outputs.missing != ''

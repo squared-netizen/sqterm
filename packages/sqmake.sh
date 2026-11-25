@@ -1,6 +1,7 @@
 # packages/sqmake.sh: what the recipes of the SDK's own tools share, the
 # tools built by sqmake from their own build.lua (sqmake, sqedit, apkpack,
-# sqdrive, square, squared-pg, and sqgui and sqconsole). A recipe names it in
+# sqdrive, square, squared-pg, and sqgui and sqconsole), and sqterm's own
+# (pkg by sqmake; sqterm-tools by the compilers alone). A recipe names it in
 # `inputs` and sources it from recipe_build:
 #
 #   . "$ROOT/packages/sqmake.sh"
@@ -8,12 +9,16 @@
 #                              tree or its archive (an `extra` file), by its
 #                              tools/bootstrap.sh (a compiler and a shell, no
 #                              make): $SQ_HOST_SQMAKE
+#   sq_path_sqmake             the sqmake on PATH (or $SQMAKE) instead, for a
+#                              recipe built from this repository, which takes
+#                              no `extra` (pkg): $SQ_HOST_SQMAKE
 #   sq_android_tools           clang and clang++ for Android, as scripts
 #                              ($SQ_TOOLS), against the sysroot and runtimes
 #                              packages; $SQ_STD_CPPM, their std.cppm
 #   sq_android_build DIR OUT GOAL...
 #                              DIR's build.lua for Android, built into OUT
-#                              (the source is only read)
+#                              (the source is only read); $SQ_BUILD_FILE for
+#                              another build file of DIR's
 #   sq_android_program FILE    holds FILE to what each of these is: an arm64
 #                              Android program that needs no C++ library
 #
@@ -38,6 +43,11 @@ sq_host_sqmake() {
   [ -x "$SQ_HOST_SQMAKE" ] || { echo "sqmake did not build in $from" >&2; return 1; }
 }
 
+sq_path_sqmake() {
+  SQ_HOST_SQMAKE=$(command -v "${SQMAKE:-sqmake}") ||
+    { echo "no sqmake on PATH (set SQMAKE; in sqterm, pkg install sqmake)" >&2; return 1; }
+}
+
 sq_android_tools() {
   [ -x "$SQ_LLVM/clang++" ] || { echo "no clang 23 at $SQ_LLVM (set LLVM_BIN)" >&2; return 1; }
   local triple=aarch64-unknown-linux-android$SQ_API
@@ -59,11 +69,12 @@ sq_android_tools() {
   # features (compiler-rt turns on outline atomics and function
   # multiversioning), and a module compiled with others is refused (CI,
   # 2026-11-19). The link's flags too (a build.lua's own are for its host):
-  # libc++ linked in, by lld, and -lpthread left out (bionic's pthreads are
-  # in libc; it has no libpthread).
+  # libc++ linked in, by lld, 16 KB pages (Android 15's devices with them
+  # load nothing aligned to less), and -lpthread left out (bionic's pthreads
+  # are in libc; it has no libpthread). As squared's build/toolchain.lua's.
   local flags="--target=$triple --sysroot=$sysroot -resource-dir=$rd -rtlib=compiler-rt -unwindlib=libunwind"
-  flags="$flags -D__BIONIC_CTYPE_INLINE=inline -Wno-unused-command-line-argument"
-  local link="-static-libstdc++ -fuse-ld=lld -L$rt/lib/$triple"
+  flags="$flags -pthread -D__BIONIC_CTYPE_INLINE=inline -Wno-unused-command-line-argument"
+  local link="-static-libstdc++ -fuse-ld=lld -Wl,-z,max-page-size=16384 -L$rt/lib/$triple"
   local drop='for a; do shift; [ "$a" = -lpthread ] || set -- "$@" "$a"; done'
   printf '#!/bin/sh\n%s\nexec "%s" %s %s "$@"\n' "$drop" "$SQ_LLVM/clang" "$flags" "$link" > "$SQ_TOOLS/clang"
   printf '#!/bin/sh\n%s\nexec "%s" %s -nostdinc++ -isystem "%s" -isystem "%s" %s "$@"\n' "$drop" "$SQ_LLVM/clang++" \
@@ -81,13 +92,13 @@ sq_android_build() {
 toolchain.build = os.getenv("SQ_OUT")
 toolchain.std_cppm = os.getenv("SQ_STD_CPPM")
 toolchain.ar = os.getenv("SQ_AR")
-include("build.lua")
+include(os.getenv("SQ_BUILD_FILE") or "build.lua")
 LUA
   local goals=() goal
   for goal; do goals+=("$out/$goal"); done
   ( cd "$dir" && env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS SQMAKE_CACHE=off OPT=-O2 \
       CXX="$SQ_TOOLS/clang++" CC="$SQ_TOOLS/clang" SQ_OUT="$out" SQ_STD_CPPM="$SQ_STD_CPPM" \
-      SQ_AR="$SQ_LLVM/llvm-ar" "$SQ_HOST_SQMAKE" -f "$here/package.lua" -j"$JOBS" "${goals[@]}" )
+      SQ_AR="$SQ_LLVM/llvm-ar" SQ_BUILD_FILE="${SQ_BUILD_FILE:-build.lua}" "$SQ_HOST_SQMAKE" -f "$here/package.lua" -j"$JOBS" "${goals[@]}" )
 }
 
 sq_android_program() {
