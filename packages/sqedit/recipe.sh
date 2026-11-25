@@ -1,4 +1,4 @@
-# sqedit 0.1.0: a text tool on parsing expression grammars, MIT. What sed,
+# sqedit 0.2.0: a text tool on parsing expression grammars, MIT. What sed,
 # grep and awk did in squared's and sqterm's builds and scripts: match,
 # pick, lines, sub, wrap and json, each with a count it can be held to.
 # squared's build needs it (build/common.mk), so it is in the APK.
@@ -8,51 +8,35 @@
 #
 # C++23 modules (`import std`), so built as sqdrive is: by a clang 23 for
 # the build machine (LLVM_BIN), against the sysroot package (bionic) and the
-# runtimes package (libc++ 23 and its std.cppm), with sqedit's own Makefile.
-# squared's sq.data and yyjson are vendored in its repository. A git source:
-# the tag's commit is in sources.lock.
+# runtimes package (libc++ 23 and its std.cppm), with sqedit's own build.lua
+# and sqmake (packages/sqmake.sh). squared's sq.data and yyjson are vendored
+# in its repository. A git source: the tag's commit is in sources.lock.
 
-version=0.1.0
+version=0.2.0
 license=MIT
 git=https://github.com/squared-netizen/sqedit
 tag=v$version
 file=
 top=
+# "SUB URL SHA256": sqmake, for the build machine (its tools/bootstrap.sh).
+extra="
+sqmake https://github.com/squared-netizen/sqmake/archive/refs/tags/v0.12.0.tar.gz 2d9f540d41cff5fd320d6e039126fd979502e0026eac99d42414cfc19ae336ff
+"
 depends="sysroot runtimes"
+inputs=packages/sqmake.sh
 bundled=yes
 keep="bin/sqedit share/licenses/sqedit"
 
 recipe_build() {
-  local bin=${LLVM_BIN:-/usr/lib/llvm-23/bin}
-  [ -x "$bin/clang++" ] || { echo "no clang 23 at $bin (set LLVM_BIN)" >&2; return 1; }
-  local triple=aarch64-unknown-linux-android$SQ_API
+  . "$ROOT/packages/sqmake.sh"
   local here=${dest%/dest}
-  local sysroot=$here/../sysroot/dest$SQ_PREFIX/share/sysroot rt=$here/../runtimes/dest$SQ_PREFIX
-  [ -d "$sysroot/usr/include" ] || { echo "no sysroot at $sysroot (build sysroot first)" >&2; return 1; }
-  local std
-  std=$(ls "$rt"/share/libc++/v*/std.cppm 2>/dev/null | head -n 1)
-  [ -f "$std" ] || { echo "no std.cppm in $rt (build runtimes first)" >&2; return 1; }
-  # The resource directory and the two compiler scripts, as sqdrive's
-  # recipe makes them (its comments say why each flag is there).
-  local rd=$here/resource-dir out=$here/obj tools=$here/tools
-  rm -rf "$rd" "$out" && mkdir -p "$rd" "$out" "$tools"
-  cp -R "$("$bin/clang" -print-resource-dir)/include" "$rd/"
-  cp -R "$rt"/lib/clang/*/lib "$rd/"
-  local flags="--target=$triple --sysroot=$sysroot -resource-dir=$rd -rtlib=compiler-rt -unwindlib=libunwind -D__BIONIC_CTYPE_INLINE=inline"
-  printf '#!/bin/sh\nexec "%s" %s "$@"\n' "$bin/clang" "$flags" > "$tools/clang"
-  printf '#!/bin/sh\nexec "%s" %s -nostdinc++ -isystem "%s" -isystem "%s" "$@"\n' "$bin/clang++" "$flags" \
-    "$rt/include/$triple/c++/v1" "$rt/include/c++/v1" > "$tools/clang++"
-  chmod +x "$tools/clang" "$tools/clang++"
-  env -u CFLAGS -u CXXFLAGS -u CPPFLAGS make -j"$JOBS" BUILD="$out" CXX="$tools/clang++" CC="$tools/clang" \
-    AR="$bin/llvm-ar" OPT=-O2 STD_MANIFEST= STD_CPPM="$std" \
-    LDFLAGS="-stdlib=libc++ -static-libstdc++ -fuse-ld=lld -L$rt/lib/$triple" \
-    "$out/sqedit"
+  sq_host_sqmake "$extra_sqmake"
+  sq_android_tools
+  # The clone is read in place: everything is built in $here/obj.
+  sq_android_build "$src" "$here/obj" sqedit
   mkdir -p "$dest$SQ_PREFIX/bin"
-  cp "$out/sqedit" "$dest$SQ_PREFIX/bin/sqedit"
-  # What it is: an arm64 Android program that needs no C++ library.
-  "$bin/llvm-readelf" -h "$dest$SQ_PREFIX/bin/sqedit" | "$SQEDIT" match -q -F AArch64
-  "$bin/llvm-readelf" -l "$dest$SQ_PREFIX/bin/sqedit" | "$SQEDIT" match -q -F /system/bin/linker64
-  ! "$bin/llvm-readelf" -d "$dest$SQ_PREFIX/bin/sqedit" | "$SQEDIT" match -q '"NEEDED" (!"c++" .)* "c++"'
+  cp "$here/obj/sqedit" "$dest$SQ_PREFIX/bin/sqedit"
+  sq_android_program "$dest$SQ_PREFIX/bin/sqedit"
 }
 
 recipe_after() {
