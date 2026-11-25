@@ -21,6 +21,8 @@ app = {
   exclude = {"sq_app/src/unpack_cartridge.cpp"},
   -- zstd's decoder, for the packages (12.5).
   flags = {"-Isq_app/third_party/zstd"},
+  -- The Settings screen (sq_app/src/settings.cpp).
+  libraries = {"settings"},
 }
 local built = include("sq/build/template.lua")
 

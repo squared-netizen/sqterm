@@ -61,6 +61,10 @@ void squared_main(sq::App& app) {
     app.run<sqterm::Shell>(std::move(places));
     static_cast<void>(app.keep_running({.title = sqterm::app_name, .text = "1 session"}));
     app.stage.add<sqterm::Screen>();  // by its name: so Android can keep it
+    // Settings (squared's screen), in the drawer.
+    sqterm::start_settings(app.stage, "dev.squared.sqterm");
+    sqterm::set_drawer({.title = std::string(sqterm::app_name),
+                        .buttons = {{.label = "Settings", .tap = &sqterm::show_settings}}});
     app.stage.custom("terminal_view", &sqterm::make_terminal);
     app.stage.on_surface(&sqterm::Glyphs::restore, &sqterm::glyphs());
     app.stage.push<sqterm::Screen>();
