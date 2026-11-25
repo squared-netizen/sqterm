@@ -1,18 +1,20 @@
-# square 0.3.1: the squared SDK's workspace manager, MIT. The one tool that
-# knows what a workspace is: square info, where, owner, verify, resources,
-# show, and square call (the SDK's tool protocol), on the workspaces sqpg
-# makes (pkg install squared-pg) and the cartridges it installs.
+# square 0.5.1: the squared SDK's workspace manager, MIT. The one tool that
+# knows what a workspace is: square info, where, owner, verify, roles, find,
+# pack, explode, resources, show, and square call (the SDK's tool protocol),
+# on the workspaces sqpg makes (pkg install squared-pg) and the cartridges it
+# installs, and your own ($XDG_DATA_HOME/squared-pg/resources).
 #
 #   bin/square     one static program (libc++ linked in; only Android's
 #                  libc, libm and libdl at run time)
 #
 # C++23 modules (`import std`), so built as sqedit is: by a clang 23 for the
 # build machine (LLVM_BIN), against the sysroot and runtimes packages, with
-# square's own Makefile. sqcart (with squared's sq.data and yyjson) is
-# vendored in its repository. A git source: the tag's commit is in
+# square's own Makefile. sqdrive (how it packs and explodes) and the sqcart
+# it builds on (with squared's sq.data and yyjson) are vendored in its
+# repository. A git source: the tag's commit is in
 # sources.lock.
 
-version=0.3.1
+version=0.5.1
 license=MIT
 git=https://github.com/squared-netizen/square
 tag=v$version
@@ -62,4 +64,5 @@ recipe_after() {
   mkdir -p "$to"
   cp "$src/LICENSE" "$to/LICENSE"
   cp "$src/third_party/sqcart/LICENSE" "$to/sqcart.LICENSE"
+  cp "$src/third_party/sqdrive/LICENSE" "$to/sqdrive.LICENSE"
 }

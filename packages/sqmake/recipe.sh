@@ -1,4 +1,4 @@
-# sqmake 0.10.0: the squared SDK's build system, MIT. It builds what a
+# sqmake 0.11.0: the squared SDK's build system, MIT. It builds what a
 # project's build.lua describes, on its own: no make files, no shell. It
 # finds the SDK's toolchain itself from squared's build/toolchain.lua
 # (`sqmake toolchain` says what it found, or exactly what is missing).
@@ -12,7 +12,7 @@
 # Makefile. Lua, squared's sq.data and yyjson are vendored in its
 # repository. A git source: the tag's commit is in sources.lock.
 
-version=0.10.0
+version=0.11.0
 license=MIT
 git=https://github.com/squared-netizen/sqmake
 tag=v$version
