@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           for name in sqmake sqedit apkpack; do
-            tag=$(bash -c ". packages/$name/recipe.sh; echo \$tag")
+            tag=$(bash -c ". packages/$name/recipe.sh; echo v\$version")
             git clone --quiet --depth 1 --branch "$tag" "https://github.com/squared-netizen/$name" "$RUNNER_TEMP/$name"
           done
           # sqmake from a compiler and a shell (no make), then it builds the others.
