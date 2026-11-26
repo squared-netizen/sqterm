@@ -26,7 +26,7 @@ depends="sysroot runtimes"
 # What it is built from: these decide its key (a PINNED lists its folder's
 # sources' sha256s).
 inputs="sq_app/pkg/pkg.cpp sq_app/src/unpack.cpp sq_app/src/unpack.hpp sq_app/src/unpack_cartridge.cpp
-        sq_app/third_party/zstd/zstd.h squared/third_party/yyjson/yyjson.h
+        squared/third_party/zstd/zstd.h squared/third_party/yyjson/yyjson.h
         third_party/sqcart/PINNED packages/sqmake.sh"
 keep="bin/pkg"
 

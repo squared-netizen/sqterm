@@ -15,5 +15,5 @@ local cart = include("third_party/sqcart/v3/build.lua")
 local version = os.getenv("SQTERM_PKG_VERSION") or "0"
 exe{name = "pkg", deps = {cart.read},
     srcs = {"sq_app/pkg/pkg.cpp", "sq_app/src/unpack.cpp", "sq_app/src/unpack_cartridge.cpp"},
-    flags = {"-Wall", "-Wextra", "-Isq_app/src", "-Isq_app/third_party/zstd", "-Isquared/third_party/yyjson",
+    flags = {"-Wall", "-Wextra", "-Isq_app/src", "-Isquared/third_party/zstd", "-Isquared/third_party/yyjson",
              "-DSQTERM_PKG_VERSION=\"" .. version .. "\""}}
