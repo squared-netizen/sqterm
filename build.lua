@@ -18,12 +18,10 @@ app = {
   background = true,
   -- pkg's, built by packages/pkg/recipe.sh with sqcart's reader; the app
   -- does not call it.
-  -- zstd's decoder, sq_app/third_party/zstd's (pkg's too), is not
-  -- compiled here: Settings' preferences link squared's whole zstd (the
-  -- same 1.5.7, for their export), which decodes the packages as well.
-  exclude = {"sq_app/src/unpack_cartridge.cpp", "sq_app/third_party/zstd/zstddeclib.c"},
-  -- zstd's header, for the packages (12.5).
-  flags = {"-Isq_app/third_party/zstd"},
+  exclude = {"sq_app/src/unpack_cartridge.cpp"},
+  -- zstd, for the packages (12.5): squared's (squared.zstd, which sq.data
+  -- links), the one copy the app has.
+  flags = {"-Isquared/third_party/zstd"},
   -- The Settings screen (sq_app/src/settings.cpp).
   libraries = {"settings"},
 }

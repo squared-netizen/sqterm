@@ -32,7 +32,7 @@ on:
       - squared/build/squared.lua
       - squared/build/toolchain.lua
       - squared/console/client/sqconsole.cpp
-      - sq_app/third_party/zstd/**
+      - squared/third_party/zstd/**
       - squared/third_party/yyjson/**
       # The cartridges' packer (not in any key: it packs the same installs).
       - third_party/sqcart/**
@@ -52,7 +52,7 @@ on:
       - squared/build/squared.lua
       - squared/build/toolchain.lua
       - squared/console/client/sqconsole.cpp
-      - sq_app/third_party/zstd/**
+      - squared/third_party/zstd/**
       - squared/third_party/yyjson/**
       # The cartridges' packer (not in any key: it packs the same installs).
       - third_party/sqcart/**

@@ -11,7 +11,6 @@ src/shell.cpp          the model: the shell in a pty, on the model's thread
 src/terminal_view.cpp  the widget: the screen drawn, keys sent
 src/glyphs.cpp         the fonts, mapped from the APK; the glyph atlas and its texture
 src/prefix.cpp         the prefix: the APK's packages copied out, unpacked (tar + zstd)
-third_party/zstd/      zstd's decoder (one C file) and its headers
 ```
 
 ## How it fits together

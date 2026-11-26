@@ -21,12 +21,12 @@ Licensed under the FreeType Project License:
 
 ## Zstandard
 
-`sq_app/third_party/zstd/`: zstd 1.5.7's decoder, as its
-`build/single_file_libs/create_single_file_decoder.sh` amalgamates it
-(`zstddeclib.c`), with `zstd.h` and `zstd_errors.h`. Copyright (c) Meta
-Platforms, Inc. and affiliates. Licensed under the BSD licence:
-`sq_app/third_party/zstd/LICENSE` (zstd is dual-licensed; sqterm takes the
-BSD one).
+`squared/third_party/zstd/`: zstd 1.5.7, squared's one copy (the library
+`squared.zstd`, which the app and pkg use), as its
+`build/single_file_libs/create_single_file_library.sh` amalgamates it
+(`zstd.c`), with its headers. Copyright (c) Meta Platforms, Inc. and
+affiliates. Licensed under the BSD licence: `squared/third_party/zstd/LICENSE`
+(zstd is dual-licensed; this takes the BSD one).
 
 ## The prefix's packages
 
