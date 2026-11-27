@@ -12,7 +12,7 @@
 # The version is package.squared-core's (its SQ-INF/manifest.json), and
 # SQUARED_REV says which commit, in share/squared/VERSION/REV.
 
-version=1.0.0
+version=1.3.0
 license=MIT
 file=
 top=

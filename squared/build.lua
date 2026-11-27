@@ -65,6 +65,18 @@ action{name = "sizes", needs = {sizes}, desc = "the core types' sizes (docs/deve
 -- Every test: {module, name, deps (squared's libraries by name), and what
 -- else it compiles (its stubs, a source the host's library leaves out) or
 -- says}. The source is <module>/test/<name>.cpp unless `src` says.
+-- package.squared-tui's sq.tui, beside squared-core in this repository
+-- (packages/package.squared-tui). Named by its absolute path: sqmake 0.13
+-- writes an object at <build>/obj/<source path>, so a relative path three
+-- folders up would put objects beside this file; an absolute one keeps them
+-- under the build folder.
+-- Only in squared's repository: a copy of squared-core elsewhere (sqterm's,
+-- the SDK's) has no package beside it, and is tested without it.
+local packages_dir = here:match("^(.*)/package%.squared%-core/tree/squared$")
+local tui_dir = packages_dir and packages_dir .. "/package.squared-tui/tree/sq_pkg/squared_tui"
+if tui_dir and #glob(tui_dir .. "/module.cppm") == 0 then tui_dir = nil end
+if tui_dir then squared.tui = squared.add_module("tui", tui_dir, {"term", "keys"}) end
+
 local tests = {
   {"dev", "dev_log_test", {"dev"}},
   {"dev", "frame_allocations_test", {"dev"}},
@@ -129,17 +141,15 @@ local tests = {
   {"console", "bridge_test", {"console"}, needs = {sqconsole},
    flags = {"-DSQCONSOLE_PATH=\"" .. here .. "/" .. sqconsole .. "\""}},
 
-  -- term_test and text_test count allocations with an operator new of their
-  -- own. sq.term links sq.dev (through sq.app), whose operator new lld also
-  -- takes, for the forms the test leaves to it (libc++ names them): the
-  -- test's, first on the line, is the one used.
-  {"term", "term_test", {"term"}, link = {"-Wl,--allow-multiple-definition"}},
+  {"term", "term_test", {"term"}},
   {"term", "pty_test", {"term"}},
   {"term", "key_test", {"term"}},
-  {"term", "text_test", {"term"}, link = {"-Wl,--allow-multiple-definition"}},
+  {"term", "text_test", {"term"}},
 
-  {"tui", "tui_test", {"tui"}},
 }
+-- package.squared-tui's sq.tui (packages/package.squared-tui): tested here,
+-- against this squared-core, from its own folder, when it is beside it.
+if tui_dir then tests[#tests + 1] = {"tui", "tui_test", {"tui"}, dir = tui_dir} end
 
 -- A list of paths, nested lists flattened (srcs are not flattened by sqmake).
 local function flat(list, out)
@@ -163,12 +173,14 @@ for _, t in ipairs(tests) do
   local mod, name = t[1], t[2]
   local deps = {}
   for _, d in ipairs(t[3]) do deps[#deps + 1] = assert(squared[d], "no library " .. d) end
-  local srcs = rooted({mod .. "/test/" .. name .. ".cpp", t.srcs or {}})
+  -- A module's folder: squared's own, or one a test names (a package's).
+  local dir = t.dir or root .. "/" .. mod
+  local srcs = {dir .. "/test/" .. name .. ".cpp"}
+  for _, s in ipairs(rooted(t.srcs or {})) do srcs[#srcs + 1] = s end
   local program = exe{name = mod .. "/" .. name, srcs = srcs, deps = deps,
-                      flags = {warn, "-I" .. root .. "/" .. mod .. "/src", "-I" .. root .. "/" .. mod .. "/test",
-                               t.flags or {}}, link = t.link}
+                      flags = {warn, "-I" .. dir .. "/src", "-I" .. dir .. "/test", t.flags or {}}, link = t.link}
   programs[#programs + 1] = program
-  runs[#runs + 1] = {mod = mod, name = name, program = program, needs = t.needs}
+  runs[#runs + 1] = {mod = mod, name = name, dir = t.dir, program = program, needs = t.needs}
 end
 for _, r in ipairs(runs) do
   if r.needs then for _, n in ipairs(r.needs) do programs[#programs + 1] = n end end
@@ -178,7 +190,7 @@ verb("test", {needs = {programs, dexgen, dexgen_self_test}, call = function()
   local failed = {}
   for _, r in ipairs(runs) do
     print("  test " .. r.mod .. "/" .. r.name)
-    if exec{"sh", "-c", "cd \"$1\" && exec \"$2\"", "sh", r.mod, here .. "/" .. r.program} ~= 0 then
+    if exec{"sh", "-c", "cd \"$1\" && exec \"$2\"", "sh", r.dir or r.mod, here .. "/" .. r.program} ~= 0 then
       failed[#failed + 1] = r.mod .. "/" .. r.name
     end
   end
