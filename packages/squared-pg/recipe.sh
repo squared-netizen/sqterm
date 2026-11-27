@@ -18,17 +18,17 @@
 # machine (LLVM_BIN) against the sysroot and runtimes packages, with
 # squared-pg's own build.lua (packages/sqmake.sh).
 
-version=0.1.0-alpha.5
+version=0.1.0-alpha.6
 license=MIT
 file=squared-pg-$version.tar.gz
 url=https://github.com/squared-netizen/squared-pg/archive/refs/tags/v$version.tar.gz
-sha256=d9e0693ffbf9d0c74f3ab70bc1073aaa87d7e4fb79204c82891e5f59378c131b
+sha256=a5e664fcf352ca422860fbea1d6be82d6e0bc36cbb423231fc69787c7fc984d0
 top=squared-pg-$version
 # "SUB URL SHA256": GitHub's archive of a commit, checked by its sha256.
 extra="
 sqcart  https://github.com/squared-netizen/sqcart/archive/e8676d4c6b3187dd205f9c5f5d2fa84f060d25a3.tar.gz 6e7378061203c2ec3430c7aa91592871b67983cd97ca0e957b63fe2a871c820e
-sqmake  https://github.com/squared-netizen/sqmake/archive/refs/tags/v0.12.0.tar.gz 2d9f540d41cff5fd320d6e039126fd979502e0026eac99d42414cfc19ae336ff
-squared https://github.com/squared-netizen/squared/archive/9d188e5047363d4bf22684472129c38212a34f23.tar.gz a92a2f5163e8c99f288137c8522bc248a48a0674743a48894958fbbce2753751
+sqmake  https://github.com/squared-netizen/sqmake/archive/refs/tags/v0.13.2.tar.gz fabb240ceb83e33ee01614fe1b631f51a262b985c05533bf12177ed2ba43febe
+squared https://github.com/squared-netizen/squared/archive/7fcb48a13f95f671e827b855189f23dfff6bf1b6.tar.gz 2d8501ed4e48bb258ac85771c8cd6f1832a7de046298ae5fd0fd579ddb7332e2
 "
 depends="sysroot runtimes"
 inputs=packages/sqmake.sh

@@ -19,11 +19,11 @@
 # its tag's archive (an `extra` file: packages/sqmake.sh); sqgui from its
 # tag's.
 
-version=0.4.0
+version=0.4.1
 license=MIT
 file=sqgui-$version.tar.gz
 url=https://github.com/squared-netizen/sqgui/archive/refs/tags/v$version.tar.gz
-sha256=ab1ac63aeb23f12812b72e084790dd9994d272ab28fe3591ea18cca739a41c55
+sha256=72bff05dec0646e47402320600c6cf6dd80d9e9f6e9e4d920cc26565da86e34d
 top=sqgui-$version
 # "SUB URL SHA256": sqmake, for the build machine.
 extra="
